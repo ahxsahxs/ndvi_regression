@@ -1,25 +1,68 @@
 import os
+from shutil import rmtree
 from pathlib import Path
 import keras
 import keras.backend as K
 import tensorflow as tf
+import argparse
 
 from dataset import DatasetGenerator
-from models import ConvLSTMSplineModel
-from losses import SplineLoss
-from config import MODEL_CONFIG, DATASET_PATH
+from build_model import build_eo_convlstm_model
+from losses import MaskedHuberLoss, kNDVILoss, ImprovedkNDVILoss
+from config import DATASET_PATH, VALIDATION_PATH
+
+
+class WarmupScheduler(keras.callbacks.Callback):
+    """Learning rate warmup over the first few epochs."""
+    def __init__(self, warmup_epochs=5, initial_lr=1e-5, target_lr=3e-4):
+        super().__init__()
+        self.warmup_epochs = warmup_epochs
+        self.initial_lr = initial_lr
+        self.target_lr = target_lr
+    
+    def on_epoch_begin(self, epoch, logs=None):
+        if epoch < self.warmup_epochs:
+            lr = self.initial_lr + (self.target_lr - self.initial_lr) * (epoch / self.warmup_epochs)
+            self.model.optimizer.learning_rate.assign(lr)
+            print(f'\nWarmup: Setting learning rate to {lr:.2e}')
+
+
+def adapt_inputs(x, y):
+    # Select the last time step for temporal metadata to get (batch, 3)
+    # dataset time shape: (batch, input_frames, 3)
+    t_meta = x['time'][:, -1, :]
+    
+    x_new = {
+        'sentinel2_sequence': x['sentinel2'],
+        'cloudmask_sequence': x['cloudmask'],
+        'landcover_map': x['landcover'],
+        'temporal_metadata': t_meta,
+        'weather_sequence': x['weather']
+    }
+    return x_new, y
+
 
 def train_bspline_model(
     train_dir,
     val_dir=None,
-    batch_size=2,
-    epochs=200,
-    learning_rate=1e-4,
+    batch_size=1,
+    epochs=2,
+    learning_rate=3e-4,
     checkpoint_dir='checkpoints',
     log_dir='logs/bspline',
-    checkpoint_to_resume=None,
+    resume_from=None,
     initial_epoch=0
 ):
+    # Delete old files ONLY if starting fresh
+    if resume_from is None:
+        checkpoint_path = Path(checkpoint_dir)
+        if checkpoint_path.exists():
+            rmtree(checkpoint_path)
+        
+        logs_path = Path(log_dir)
+        if logs_path.exists():
+            rmtree(logs_path)
+
     # Create directories
     os.makedirs(checkpoint_dir, exist_ok=True)
     os.makedirs(log_dir, exist_ok=True)
@@ -30,62 +73,86 @@ def train_bspline_model(
     generator = DatasetGenerator(train_dir)
     train_dataset = generator.get_dataset()
 
-    # Shuffle and Batch
-    train_dataset = train_dataset.shuffle(100).batch(batch_size).repeat().prefetch(tf.data.AUTOTUNE)
+    # Shuffle and Batch (buffer=100 for proper randomization)
+    train_dataset = train_dataset.shuffle(100).batch(batch_size).repeat()
+    # Apply mapping to match model inputs
+    train_dataset = train_dataset.map(adapt_inputs, num_parallel_calls=tf.data.AUTOTUNE)
+    train_dataset = train_dataset.prefetch(tf.data.AUTOTUNE)
 
     val_dataset = val_generator = None
     if val_dir and os.path.exists(val_dir):
         print(f"Loading validation data from {val_dir}...")
         val_generator = DatasetGenerator(val_dir)
         val_dataset = val_generator.get_dataset()
-        val_dataset = val_dataset.batch(batch_size).repeat().prefetch(tf.data.AUTOTUNE)
+        val_dataset = val_dataset.batch(batch_size).repeat()
+        val_dataset = val_dataset.map(adapt_inputs, num_parallel_calls=tf.data.AUTOTUNE)
+        val_dataset = val_dataset.prefetch(tf.data.AUTOTUNE)
 
-    # 2. Model - Either load from checkpoint or create new
-    if checkpoint_to_resume and os.path.exists(checkpoint_to_resume):
-        print(f"Loading model from checkpoint: {checkpoint_to_resume}")
-        # Load the full model including optimizer state
-        model = keras.models.load_model(
-            checkpoint_to_resume
-        )
-        print("Model loaded successfully. Resuming training...")
-        model.summary()
+    # 2. Model
+    if resume_from:
+        print(f"Resuming training from {resume_from}...")
+        model = keras.models.load_model(resume_from)
+        # Re-compile might be needed if custom objects were tricky, but usually load_model handles it if registered.
+        # Just to be safe regarding optimizer learning rate if we want to change it:
+        # model.compile(...) # Only if we want to override saved optimizer state.
+        # For now, let's respect the saved state but update LR if user asked? 
+        # Typically resume implies continuing exactly as is or with new schedule. 
+        # Let's keep it simple: load and run.
     else:
-        if checkpoint_to_resume:
-            print(f"Warning: Checkpoint {checkpoint_to_resume} not found. Creating new model...")
+        print("Creating EO ConvLSTM model...")
+        model = build_eo_convlstm_model()
+        
+        # 3. Compile with gradient clipping for ConvLSTM stability
+        optimizer = keras.optimizers.AdamW(
+            learning_rate=learning_rate,
+            clipnorm=1.0  # Gradient clipping to prevent exploding gradients
+        )
+        loss = ImprovedkNDVILoss(
+            kndvi_clip=0.5,      # Gradient clipping threshold
+            sigma=0.5,           # RBF kernel sigma
+            learn_weights=True   # Enable uncertainty weighting
+        )
+        model.compile(optimizer=optimizer, loss=loss)
 
-        print("Creating ConvFormer model...")
-        model = ConvLSTMSplineModel(**MODEL_CONFIG)
-
-        # 3. Compile
-        optimizer = keras.optimizers.Adam(learning_rate=learning_rate)
-        loss=SplineLoss(smoothness_weight=0.01, curvature_weight=0.005)
-
-        model.compile(optimizer=optimizer, loss=loss, metrics=['mae', 'mse'])
+    # Display Model Summary
+    model.summary()
 
     # 4. Callbacks
     # Save full model (not just weights) to preserve optimizer state
-    checkpoint_path = os.path.join(checkpoint_dir, 'best_model.keras')
+    checkpoint_path = os.path.join(checkpoint_dir, 'model_at_{epoch}.keras')
 
+    # Get loss function for epoch callback
+    loss_fn = model.loss
+    
+    # Determine which metric to monitor (prefer val_loss when available)
+    monitor_metric = 'val_loss' if val_dataset is not None else 'loss'
+    
     callbacks = [
+        # Warmup LR for first 5 epochs to stabilize training
+        WarmupScheduler(
+            warmup_epochs=5,
+            initial_lr=1e-5,
+            target_lr=learning_rate
+        ),
         keras.callbacks.ModelCheckpoint(
             checkpoint_path,
-            monitor='loss',
-            save_best_only=True,
+            monitor=monitor_metric,
+            save_best_only=False,
             save_weights_only=False,  # Save full model including optimizer
             mode='min',
             verbose=1
         ),
         keras.callbacks.ReduceLROnPlateau(
-            monitor='loss',
+            monitor=monitor_metric,
             factor=0.5,
-            patience=10,
-            min_lr=1e-7,
+            patience=15,
+            min_lr=1e-9,
             verbose=1,
             mode='min'
         ),
         keras.callbacks.EarlyStopping(
-            monitor='loss',
-            patience=25,
+            monitor=monitor_metric,
+            patience=35,
             restore_best_weights=True,
             verbose=1,
             mode='min'
@@ -121,33 +188,50 @@ def train_bspline_model(
         )
     except KeyboardInterrupt:
         print("Training interrupted.")
-        return model
+        # Attempt save on interrupt?
+        # return model
 
     # Save final model (full model with optimizer state)
     final_model_path = os.path.join(checkpoint_dir, 'final_model.keras')
     print(f"Saving final model to {final_model_path}...")
     model.save(final_model_path)
-
+    
     del model
     K.clear_session()
-
     print("Training complete.")
 
 
-if __name__ == "__main__":
-    SPLINE_PATH = Path("/home/me/workspace/bspline_ndvi")
+def main():
+    parser = argparse.ArgumentParser(description="Train BSpline NDVI Model")
+    
+    # Path Arguments
+    parser.add_argument('--train_dir', type=str, default=str(DATASET_PATH), help='Path to training dataset')
+    parser.add_argument('--val_dir', type=str, default=str(VALIDATION_PATH), help='Path to validation dataset')
+    parser.add_argument('--checkpoint_dir', type=str, default='checkpoints', help='Directory to save checkpoints')
+    parser.add_argument('--log_dir', type=str, default='logs/bspline', help='Directory for TensorBoard logs')
+    parser.add_argument('--resume_from', type=str, default=None, help='Path to .keras model file to resume training from')
+    
+    # Hyperparameters
+    parser.add_argument('--batch_size', type=int, default=1, help='Batch size')
+    parser.add_argument('--epochs', type=int, default=500, help='Number of epochs')
+    parser.add_argument('--learning_rate', type=float, default=3e-4, help='Initial learning rate')
+    parser.add_argument('--initial_epoch', type=int, default=0, help='Epoch to start/resume from')
 
-    LOGS_PATH = SPLINE_PATH / "logs"
+    args = parser.parse_args()
 
-    CHECKPOINTS_PATH = SPLINE_PATH / "checkpoints"
-    BEST_CHECKPOINT_PATH = CHECKPOINTS_PATH / "best_model.keras"
-
+    # Convert paths to absolute if needed, or leave as is.
+    
     train_bspline_model(
-        train_dir=str(DATASET_PATH),
-        val_dir=None,
-        batch_size=2,
-        learning_rate=1e-3,
-        checkpoint_dir=str(CHECKPOINTS_PATH),
-        log_dir=str(LOGS_PATH),
-        checkpoint_to_resume=str(BEST_CHECKPOINT_PATH),
+        train_dir=args.train_dir,
+        val_dir=args.val_dir,
+        batch_size=args.batch_size,
+        epochs=args.epochs,
+        learning_rate=args.learning_rate,
+        checkpoint_dir=args.checkpoint_dir,
+        log_dir=args.log_dir,
+        resume_from=args.resume_from,
+        initial_epoch=args.initial_epoch
     )
+
+if __name__ == "__main__":
+    main()

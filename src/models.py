@@ -3,70 +3,29 @@ from keras import layers
 import tensorflow as tf
 
 @keras.utils.register_keras_serializable(package="ConvLSTMSpline")
-class CubicSplineLayer(layers.Layer):
-    """
-    Layer for cubic polynomial splines.
-    """
-
-    def __init__(self, num_future_frames=20, name='cubic_spline_layer', **kwargs):
-        super().__init__(name=name, **kwargs)
-        self.num_future_frames = num_future_frames
-
-    def call(self, spline_params):
-        # Create t_matrix inside call to avoid scope issues
-        t = tf.range(1, self.num_future_frames + 1, dtype=tf.float32)
-        t_norm = t / self.num_future_frames
-
-        t_matrix = tf.stack([
-            tf.ones_like(t_norm),
-            t_norm,
-            t_norm ** 2,
-            t_norm ** 3
-        ], axis=-1)
-
-        batch = tf.shape(spline_params)[0]
-        h = tf.shape(spline_params)[1]
-        w = tf.shape(spline_params)[2]
-        channels = tf.shape(spline_params)[3]
-
-        params_flat = tf.reshape(spline_params, [-1, 4])
-        preds_flat = tf.matmul(params_flat, t_matrix, transpose_b=True)
-        preds = tf.reshape(preds_flat, [batch, h, w, channels, self.num_future_frames])
-        preds = tf.transpose(preds, [0, 4, 1, 2, 3])
-
-        return preds
-
-    def get_config(self):
-        config = super().get_config()
-        config.update({"num_future_frames": self.num_future_frames})
-        return config
-    
-
-@keras.utils.register_keras_serializable(package="ConvLSTMSpline")
-class ConvLSTMSplineModel(keras.Model):
+class ConvLSTMPredictionModel(keras.Model):
     def __init__(
         self,
-        input_frames=10,
-        output_frames=20,
+        input_frames=18,
+        output_frames=12,
         img_size=128,
-        inp_channels=4,
         out_channels=4,
-        conv_filters=[30, 30, 30],
+        conv_filters=[64],
         dropout_rate=0.3,
+        poly_degree=2,
         **kwargs
     ):
         """
-        ConvLSTM model with attention mechanisms and B-spline predictions.
+        ConvLSTM model with attention mechanisms and pixel-wise MLP predictions.
 
         Args:
             input_frames: Number of input temporal frames
             output_frames: Number of output temporal frames to predict
             img_size: Spatial dimension of images
-            inp_channels: Number of spectral bands in the input data
             out_channels: Number of spectral bands in the target data
-            n_control_points: Number of B-spline control points
             conv_filters: List of filter sizes for ConvLSTM layers
             dropout_rate: Dropout rate for regularization
+            poly_degree: Degree of the polynomial curve used for future forecasting
         """
         super().__init__(**kwargs)
 
@@ -77,10 +36,13 @@ class ConvLSTMSplineModel(keras.Model):
         self.out_channels = out_channels
         self.conv_filters = conv_filters
         self.dropout_rate = dropout_rate
+        self.poly_degree = poly_degree
+
+        # Metrics
+        self.loss_tracker = keras.metrics.Mean(name="loss")
 
         # ConvLSTM layers
         self.convlstm_layers = []
-        self.batch_norms_lstm = []
 
         for i, filters in enumerate(conv_filters):
             return_sequences = (i < len(conv_filters) - 1)
@@ -96,36 +58,12 @@ class ConvLSTMSplineModel(keras.Model):
                     name=f'convlstm_{i+1}'
                 )
             )
-            self.batch_norms_lstm.append(layers.BatchNormalization(name=f"convlstm_{i+1}_batchnorm"))
 
-        # Additional spatial processing
-        self.conv2d_1 = layers.Conv2D(64, (3, 3), padding='same', activation='relu', name="conv2d_1")
-        self.conv2d_1_batchnorm = layers.BatchNormalization(name="conv2d_1_batchnorm")
-        self.conv2d_1_dropout = layers.Dropout(dropout_rate, name=f"conv2d_1_dropout")
-
-        self.conv2d_2 = layers.Conv2D(64, (3, 3), padding='same', activation='relu', name="conv2d_2")
-        self.conv2d_2_batchnorm = layers.BatchNormalization(name="conv2d_2_batchnorm")
-
-        # Spline parameters
-        self.n_params = 4
-        self.spline_layer = CubicSplineLayer(
-            num_future_frames=output_frames,
-            name="spline_layer"
-        )
-
-        # Parameter prediction layer
-        self.conv2d_spline_params = layers.Conv2D(
-            out_channels * self.n_params,
-            (1, 1),
-            padding='same',
-            name='conv2d_spline_params'
-        )
-
-        # Reshape layer
-        self.reshape_params = layers.Reshape(
-            (img_size, img_size, out_channels, self.n_params),
-            name='reshape_params'
-        )
+        # Pixel-wise MLP
+        self.mlp = keras.Sequential([
+            layers.Conv2D(64, (3, 3), padding='same', activation='tanh', name="mlp_hidden"),
+            layers.Conv2D(out_channels * (self.poly_degree + 1), (3, 3), activation='tanh', padding='same', name="mlp_output")
+        ], name="pixel_wise_mlp")
 
     def call(self, inputs, training=None):
         """
@@ -170,35 +108,61 @@ class ConvLSTMSplineModel(keras.Model):
             time_tiled,
             landcover_tiled
         ], axis=-1)
-
-        print("X Shape: ", tf.shape(x)) 
         
-
         # ConvLSTM layers for spatiotemporal feature extraction
-        for convlstm, bn in zip(self.convlstm_layers, self.batch_norms_lstm):
+        for convlstm in self.convlstm_layers:
             x = convlstm(x, training=training)
-            x = bn(x, training=training)
 
-        # Additional spatial processing
-        x = self.conv2d_1(x, training=training)
-        x = self.conv2d_1_batchnorm(x, training=training)
-        x = self.conv2d_1_dropout(x, training=training)
+        # Predict using pixel-wise MLP
+        x = self.mlp(x, training=training) # (batch, h, w, output_frames * out_channels)
 
-        x = self.conv2d_2(x, training=training)
-        x = self.conv2d_2_batchnorm(x, training=training)
+        # Reshape to (batch, output_frames, h, w, out_channels)
+        # x is (batch, h, w, frames*channels)
+        curve_params = tf.reshape(x, [batch_size, height, width, self.out_channels, self.poly_degree+1])
+        
+        # deltas[t] = a*t² + b*t + c
+        deltas = self.horner_polynomial(curve_params)
 
-        # Predict spline parameters
-        spline_params = self.conv2d_spline_params(x, training=training)
-        spline_params = self.reshape_params(spline_params)
+        return {"deltas": deltas, "cloudmask": None, "sentinel2": None}
 
-        # Generate predictions through spline interpolation
-        predictions = self.spline_layer(spline_params, training=training)
 
-        return {"deltas": predictions}
+    def horner_polynomial(self, params:tf.Tensor):
+        """
+        Evaluate polynomial using vectorized Horner's method.
+        
+        Args:
+            params: Tensor of shape (batch, height, width, n_bands, poly_degree+1)
+                    Coefficients ordered from highest to lowest degree
+                    [a_n, a_{n-1}, ..., a_1, a_0]
+        Returns:
+            deltas: Tensor of shape (batch, output_frames, height, width, n_bands)
+        """
+        # Create time values: [1, 2, 3, ..., output_frames]
+        times = tf.range(1, self.output_frames + 1, dtype=tf.float32)
+        times = tf.reshape(times, [1, self.output_frames, 1, 1, 1])
+        
+        # Expand params: (batch, 1, height, width, n_bands, poly_degree+1)
+        params_expanded = tf.expand_dims(params, axis=1)
+        
+        # Split coefficients along last dimension
+        # coeffs is a list of (poly_degree+1) tensors, each (batch, 1, H, W, n_bands)
+        coeffs = tf.unstack(params_expanded, axis=-1)
+        
+        # Initialize with highest degree coefficient
+        result = coeffs[0]
+        
+        # Horner's method: result = result * t + next_coeff
+        for coeff in coeffs[1:]:
+            result = result * times + coeff
+        
+        return result
+
+    @property
+    def metrics(self):
+        return [self.loss_tracker]
 
     def train_step(self, data):
-        # Unpack the data. Its structure depends on your model and
-        # on what you pass to `fit()`.
+        # Unpack the data
         if len(data) == 3:
             x, y, sample_weight = data
         else:
@@ -207,21 +171,14 @@ class ConvLSTMSplineModel(keras.Model):
 
         with tf.GradientTape() as tape:
             y_pred = self(x, training=True)  # Forward pass
-            
-            # Extract the specific target and prediction for the main loss
-            # y contains: sentinel2, cloudmask, deltas
-            # y_pred contains: deltas
-            
-            # Add dummy cloudmask to y_pred to satisfy SplineLoss requirements
-            y_pred_loss = {"deltas": y_pred["deltas"], "cloudmask": y["cloudmask"]}
-            
-            # Compute loss manually to avoid Keras structure checks
-            loss = self.loss(y, y_pred_loss)
-            
-            # Add regularization losses
-            if self.losses:
-                loss += tf.add_n(self.losses)
-        
+            # Compute the loss value.
+            # The loss function is configured in `compile()`.
+            loss = self.loss(
+                y,
+                y_pred,
+                sample_weight=sample_weight,
+            )
+
         # Compute gradients
         trainable_vars = self.trainable_variables
         gradients = tape.gradient(loss, trainable_vars)
@@ -229,14 +186,14 @@ class ConvLSTMSplineModel(keras.Model):
         # Update weights
         self.optimizer.apply(gradients, trainable_vars)
 
-        # Update the metrics.
+        # Update metrics (includes the metric that tracks the loss)
         for metric in self.metrics:
             if metric.name == "loss":
                 metric.update_state(loss)
             else:
-                metric.update_state(y["deltas"], y_pred["deltas"], sample_weight=sample_weight)
+                metric.update_state(y, y_pred)
 
-        # Return a dict mapping metric names to current value.
+        # Return a dict mapping metric names to current value
         return {m.name: m.result() for m in self.metrics}
 
     def test_step(self, data):
@@ -249,22 +206,19 @@ class ConvLSTMSplineModel(keras.Model):
 
         # Compute predictions
         y_pred = self(x, training=False)
-
         # Updates the metrics tracking the loss
-        y_pred_loss = {"deltas": y_pred["deltas"], "cloudmask": y["cloudmask"]}
-        loss = self.loss(y, y_pred_loss)
-        
+        loss = self.loss(y, y_pred)
         # Update the metrics.
         for metric in self.metrics:
             if metric.name == "loss":
                 metric.update_state(loss)
             else:
-                metric.update_state(y["deltas"], y_pred["deltas"])
-        
+                metric.update_state(y, y_pred)
+
         # Return a dict mapping metric names to current value.
+        # Note that it will include the loss (tracked in self.metrics).
         return {m.name: m.result() for m in self.metrics}
-
-
+        
     def get_config(self):
         """Return configuration for serialization."""
         config = super().get_config()
@@ -275,6 +229,7 @@ class ConvLSTMSplineModel(keras.Model):
             "out_channels": self.out_channels,
             "conv_filters": self.conv_filters,
             "dropout_rate": self.dropout_rate,
+            "poly_degree": self.poly_degree,
         })
         return config
 
@@ -282,3 +237,4 @@ class ConvLSTMSplineModel(keras.Model):
     def from_config(cls, config):
         """Create model from configuration."""
         return cls(**config)
+    

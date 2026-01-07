@@ -1,6 +1,6 @@
-from models import ConvLSTMSplineModel
+from models import ConvLSTMPredictionModel
 from config import MODEL_CONFIG
-from losses import SplineLoss
+from losses import kNDVILoss
 
 import keras
 from keras import backend as K
@@ -8,7 +8,7 @@ import numpy as np
 import tensorflow as tf
 
 # Build cubic spline model for comparison
-MODEL = ConvLSTMSplineModel(**MODEL_CONFIG)
+MODEL = ConvLSTMPredictionModel(**MODEL_CONFIG)
 
 DUMMY_INPUT = {
     'time': tf.zeros((1, 10, 3)),
@@ -26,7 +26,7 @@ def fit_dummy_model():
     # Compile
     MODEL.compile(
         optimizer=keras.optimizers.Adam(learning_rate=1e-4),
-        loss=SplineLoss(smoothness_weight=0.01, curvature_weight=0.005),
+        loss=kNDVILoss(),
         metrics=['mae', 'mse']
     )
     
@@ -58,7 +58,7 @@ def fit_dummy_model():
     print(f"Target shape: {dummy_target['deltas'].shape}")
     
     # Compute loss
-    loss_fn = SplineLoss(smoothness_weight=0.01, curvature_weight=0.005)
+    loss_fn = kNDVILoss(smoothness_weight=0.01, curvature_weight=0.005)
     loss = loss_fn(dummy_target, predictions)
     print(f"Loss: {loss.numpy():.4f}")
     

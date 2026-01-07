@@ -1,225 +1,246 @@
 import keras
 from keras import layers
 import tensorflow as tf
+
 @keras.utils.register_keras_serializable(package="ConvLSTMSpline")
-class SplineLoss(keras.losses.Loss):
-    """
-    Custom loss for spline-based predictions with multiple regularization terms.
-    Ignores cloud areas (where cloudmask == 1) when computing losses.
-    """
-    def __init__(self, smoothness_weight=0, curvature_weight=0, 
-                 name='spline_loss', **kwargs):
+class MaskedHuberLoss(keras.losses.Loss):
+    def __init__(self, delta=0.1, name='masked_huber_loss', **kwargs):
         super().__init__(name=name, **kwargs)
-        self.smoothness_weight = smoothness_weight
-        self.curvature_weight = curvature_weight
-    
+        self.delta = delta
+        # Reduced delta to 0.1 to provide stronger gradients for small delta errors (typically in [-0.2, 0.2])
+        self.huber = keras.losses.Huber(delta=delta, reduction="none")
+
     def call(self, y_true, y_pred):
-        """
-        Args:
-            y_true: dict with keys:
-                - "deltas": (batch, output_frames, h, w, channels)
-                - "cloudmask": (batch, output_frames, h, w, channels, 1)
-            y_pred: dict with key:
-                - "deltas": (batch, output_frames, h, w, channels)
-        """
-        y_true_img = y_true["deltas"]
-        y_true_cloudmask = y_true["cloudmask"]    
-        y_pred_img = y_pred["deltas"]
+        # y_true structure: (batch, time, w, h, 5)
+        # channel 0: cloudmask
+        # channels 1-4: deltas
         
-        # Create binary mask: 0 where clouds (mask==1), 1 where clear (mask==0)
-        # Squeeze the last dimension to match y_true_img shape
-        clear_mask = 1.0 - y_true_cloudmask  # (batch, frames, h, w, 1)
+        # y_pred structure: (batch, time, w, h, 4) matches deltas
         
-        # Main reconstruction loss (MSE) - only on clear pixels
-        squared_error = tf.square(y_true_img - y_pred_img)
-        masked_squared_error = squared_error * clear_mask
+        cloudmask = y_true[..., 0:1]
+        y_true_deltas = y_true[..., 1:]
         
-        # Compute mean over non-cloud pixels
-        num_clear_pixels = tf.reduce_sum(clear_mask) + 1e-8  # Add epsilon to avoid division by zero
-        mse_loss = tf.reduce_sum(masked_squared_error) / num_clear_pixels
+        # Invert mask: 1 for clear (valid), 0 for cloudy (invalid)
+        sample_weight = 1.0 - cloudmask
         
-        total_loss = mse_loss
+        # Compute huber loss
+        # Note: Huber loss with reduction=NONE returns (batch, temp_dims)
+        loss = self.huber(y_true_deltas, y_pred) # (batch, time, w, h) (if channels are averaged by Huber default?)
         
-        # First-order smoothness (velocity) - mask temporal differences
-        if self.smoothness_weight > 0:
-            d1 = y_pred_img[:, 1:, :, :, :] - y_pred_img[:, :-1, :, :, :]
-            
-            # Mask for temporal differences: both frames must be clear
-            clear_mask_t1 = clear_mask[:, 1:, :, :, :]
-            clear_mask_t0 = clear_mask[:, :-1, :, :, :]
-            clear_mask_temporal = clear_mask_t1 * clear_mask_t0
-            
-            masked_d1 = tf.square(d1) * clear_mask_temporal
-            num_clear_temporal = tf.reduce_sum(clear_mask_temporal) + 1e-8
-            smoothness_loss = tf.reduce_sum(masked_d1) / num_clear_temporal
-            
-            total_loss += self.smoothness_weight * smoothness_loss
+        # sample_weight is (B, T, W, H, 1)
+        # squeze sample_weight to (B, T, W, H)
+        weights = tf.squeeze(sample_weight, axis=-1)
         
-        # Second-order smoothness (acceleration/curvature)
-        if self.curvature_weight > 0:
-            d1 = y_pred_img[:, 1:, :, :, :] - y_pred_img[:, :-1, :, :, :]
-            d2 = d1[:, 1:, :, :, :] - d1[:, :-1, :, :, :]
-            
-            # Mask for second-order differences: all three frames must be clear
-            clear_mask_t2 = clear_mask[:, 2:, :, :, :]
-            clear_mask_t1 = clear_mask[:, 1:-1, :, :, :]
-            clear_mask_t0 = clear_mask[:, :-2, :, :, :]
-            clear_mask_curvature = clear_mask_t2 * clear_mask_t1 * clear_mask_t0
-            
-            masked_d2 = tf.square(d2) * clear_mask_curvature
-            num_clear_curvature = tf.reduce_sum(clear_mask_curvature) + 1e-8
-            curvature_loss = tf.reduce_sum(masked_d2) / num_clear_curvature
-            
-            total_loss += self.curvature_weight * curvature_loss
+        masked_loss = loss * weights
         
-        return total_loss
-    
+        # Simple mean over the batch/time/space
+        return tf.reduce_mean(masked_loss)
+        
     def get_config(self):
         config = super().get_config()
-        config.update({
-            "smoothness_weight": self.smoothness_weight,
-            "curvature_weight": self.curvature_weight
-        })
+        config.update({'delta': self.delta})
         return config
 
 @keras.utils.register_keras_serializable(package="ConvLSTMSpline")
 class kNDVILoss(keras.losses.Loss):
-    """
-    Custom loss that combines L1 loss on spectral bands and kNDVI.
-    
-    Loss = 0.125*L1(B02) + 0.125*L1(B03) + 0.125*L1(B04) + 0.125*L1(B8a) + 0.5*L1(kNDVI)
-    
-    Also supports smoothness and curvature regularization.
-    """
-    def __init__(self, smoothness_weight=0, curvature_weight=0, 
-                 name='kndvi_loss', **kwargs):
-        super().__init__(name=name, **kwargs)
-        self.smoothness_weight = smoothness_weight
-        self.curvature_weight = curvature_weight
-        self.epsilon = 1e-5
-    
-    def kndvi(self, b04, b8a):
-        """
-        Compute kNDVI = tanh[(B8a-B04)/(B8a+B04+epsilon)]
-        """
-        # Using tanh for kNDVI as specified
-        # Note: B04 is index 2, B8a is index 3 in the 4-channel input
-        diff = b8a - b04
-        add = b8a + b04 + self.epsilon
-        return tf.math.tanh(diff / add)
-
-    def call(self, y_true, y_pred):
+    def __init__(self, alpha=1.0, beta=1.0, sigma=0.5, name='kndvi_loss', **kwargs):
         """
         Args:
-            y_true: dict with keys:
-                - "deltas": (batch, output_frames, h, w, channels)
-                - "sentinel2": (batch, output_frames, h, w, channels) [Target Absolute Values]
-                - "cloudmask": (batch, output_frames, h, w, channels, 1)
-            y_pred: dict with key:
-                - "deltas": (batch, output_frames, h, w, channels)
+            alpha: Weight for the regression (masked huber) component.
+            beta: Weight for the kNDVI component.
+            sigma: Sigma parameter for the kNDVI RBF kernel.
         """
-        y_true_deltas = y_true["deltas"]
-        y_true_sentinel2 = y_true["sentinel2"]
-        y_true_cloudmask = y_true["cloudmask"]    
-        y_pred_deltas = y_pred["deltas"]
+        super().__init__(name=name, **kwargs)
+        self.alpha = alpha
+        self.beta = beta
+        self.sigma = sigma
+        self.fn_huber = keras.losses.Huber(delta=0.1, reduction="none")
+
+    def kernel_function(self, n, r):
+        """
+        RBF Kernel k(n, r) = exp(-(n-r)^2 / (2*sigma^2))
+        """
+        diff = n - r
+        return tf.exp(- tf.square(diff) / (2 * self.sigma ** 2))
+
+    def compute_kndvi(self, nir, red):
+        """
+        kNDVI = (1 - k(n,r)) / (1 + k(n,r))
+        """
+        k_val = self.kernel_function(nir, red)
+        return (1.0 - k_val) / (1.0 + k_val + 1e-6)
+
+    def call(self, y_true, y_pred):
+        # y_true structure: (batch, time, w, h, 9)
+        # channel 0: cloudmask
+        # channels 1-4: deltas (true)
+        # channels 5-8: BAP (base image)
         
-        # Reconstruct absolute predictions
-        # We know y_true_sentinel2 = last_img + y_true_deltas
-        # So last_img = y_true_sentinel2 - y_true_deltas
-        # And y_pred_sentinel2 = last_img + y_pred_deltas
-        #                      = (y_true_sentinel2 - y_true_deltas) + y_pred_deltas
+        # y_pred structure: (batch, time, w, h, 4) matches deltas
         
-        last_img = y_true_sentinel2 - y_true_deltas
-        y_pred_sentinel2 = last_img + y_pred_deltas
+        # --- Unpack ---
+        cloudmask = y_true[..., 0:1] # (B, T, W, H, 1)
+        true_deltas = y_true[..., 1:5] # (B, T, W, H, 4)
+        bap = y_true[..., 5:9] # (B, T, W, H, 4)
         
-        # Create binary mask: 0 where clouds (mask==1), 1 where clear (mask==0)
-        clear_mask = 1.0 - y_true_cloudmask  # (batch, frames, h, w, 1)
+        pred_deltas = y_pred # (B, T, W, H, 4)
         
-        # --- Spectral Band L1 Loss ---
-        # Bands: B02(0), B03(1), B04(2), B8a(3)
-        # Weights: 0.125 each
+        # --- 1. Regression Loss (Huber on Deltas) ---
+        sample_weight = 1.0 - cloudmask
+        # Note: We must squeeze the weight for Huber if reduction=None handles basic dims, 
+        # but here we can just do elementwise mult.
         
-        abs_error = tf.abs(y_true_sentinel2 - y_pred_sentinel2)
-        masked_abs_error = abs_error * clear_mask
+        reg_loss = self.fn_huber(true_deltas, pred_deltas) # (B, T, W, H) likely averaged over channels
+        # Expand dims for broadcasting if needed, but huber usually reduces last dim.
+        # Let's ensure shape consistency.
         
-        # We can compute mean L1 per band or sum and divide.
-        # The prompt says: "aggregated (by weighted sum) with weights 0.125..."
-        # This implies we sum the errors (or mean errors) weighted by these factors.
-        # Usually losses are means over the batch/pixels.
+        # Weighted mean
+        masked_reg_loss = reg_loss * tf.squeeze(sample_weight, axis=-1)
+        total_reg_loss = tf.reduce_sum(masked_reg_loss) / (tf.reduce_sum(sample_weight) + 1e-6)
         
-        num_clear_pixels = tf.reduce_sum(clear_mask) + 1e-8
+        # --- 2. kNDVI Loss ---
+        # Reconstruct Full Images
+        # Bands: B02, B03, B04 (Red), B8A (NIR)
+        # Indx:   0,   1,   2,         3
         
-        # Calculate L1 loss per band
-        # masked_abs_error is (B, T, H, W, 4)
+        true_full = bap + true_deltas
+        pred_full = bap + pred_deltas
         
-        # Split channels
-        l1_b02 = tf.reduce_sum(masked_abs_error[..., 0]) / num_clear_pixels
-        l1_b03 = tf.reduce_sum(masked_abs_error[..., 1]) / num_clear_pixels
-        l1_b04 = tf.reduce_sum(masked_abs_error[..., 2]) / num_clear_pixels
-        l1_b8a = tf.reduce_sum(masked_abs_error[..., 3]) / num_clear_pixels
+        # Extract Red and NIR
+        true_red = true_full[..., 2]
+        true_nir = true_full[..., 3]
         
-        spectral_loss = 0.125 * (l1_b02 + l1_b03 + l1_b04 + l1_b8a)
+        pred_red = pred_full[..., 2]
+        pred_nir = pred_full[..., 3]
         
-        # --- kNDVI Loss ---
-        # kNDVI uses B04 (idx 2) and B8a (idx 3)
+        true_kndvi = self.compute_kndvi(true_nir, true_red)
+        pred_kndvi = self.compute_kndvi(pred_nir, pred_red)
         
-        # True kNDVI
-        kndvi_true = self.kndvi(y_true_sentinel2[..., 2], y_true_sentinel2[..., 3])
+        # L1 Loss on kNDVI
+        kndvi_diff = tf.abs(true_kndvi - pred_kndvi)
+        masked_kndvi_loss = kndvi_diff * tf.squeeze(sample_weight, axis=-1)
+        total_kndvi_loss = tf.reduce_sum(masked_kndvi_loss) / (tf.reduce_sum(sample_weight) + 1e-6)
         
-        # Pred kNDVI
-        kndvi_pred = self.kndvi(y_pred_sentinel2[..., 2], y_pred_sentinel2[..., 3])
-        
-        # L1 Loss for kNDVI
-        # kNDVI shape is (B, T, H, W) -> expand to (B, T, H, W, 1) for masking
-        kndvi_diff = tf.abs(kndvi_true - kndvi_pred)
-        kndvi_diff = tf.expand_dims(kndvi_diff, axis=-1)
-        
-        masked_kndvi_diff = kndvi_diff * clear_mask
-        l1_kndvi = tf.reduce_sum(masked_kndvi_diff) / num_clear_pixels
-        
-        kndvi_loss_term = 0.5 * l1_kndvi
-        
-        total_loss = spectral_loss + kndvi_loss_term
-        
-        # --- Regularization (Smoothness/Curvature) ---
-        # Applied on DELTAS (velocity) as in SplineLoss
-        
-        # First-order smoothness (velocity)
-        if self.smoothness_weight > 0:
-            d1 = y_pred_deltas[:, 1:, :, :, :] - y_pred_deltas[:, :-1, :, :, :]
-            
-            clear_mask_t1 = clear_mask[:, 1:, :, :, :]
-            clear_mask_t0 = clear_mask[:, :-1, :, :, :]
-            clear_mask_temporal = clear_mask_t1 * clear_mask_t0
-            
-            masked_d1 = tf.square(d1) * clear_mask_temporal
-            num_clear_temporal = tf.reduce_sum(clear_mask_temporal) + 1e-8
-            smoothness_loss = tf.reduce_sum(masked_d1) / num_clear_temporal
-            
-            total_loss += self.smoothness_weight * smoothness_loss
-        
-        # Second-order smoothness (acceleration/curvature)
-        if self.curvature_weight > 0:
-            d1 = y_pred_deltas[:, 1:, :, :, :] - y_pred_deltas[:, :-1, :, :, :]
-            d2 = d1[:, 1:, :, :, :] - d1[:, :-1, :, :, :]
-            
-            clear_mask_t2 = clear_mask[:, 2:, :, :, :]
-            clear_mask_t1 = clear_mask[:, 1:-1, :, :, :]
-            clear_mask_t0 = clear_mask[:, :-2, :, :, :]
-            clear_mask_curvature = clear_mask_t2 * clear_mask_t1 * clear_mask_t0
-            
-            masked_d2 = tf.square(d2) * clear_mask_curvature
-            num_clear_curvature = tf.reduce_sum(clear_mask_curvature) + 1e-8
-            curvature_loss = tf.reduce_sum(masked_d2) / num_clear_curvature
-            
-            total_loss += self.curvature_weight * curvature_loss
-        
-        return total_loss
-    
+        return self.alpha * total_reg_loss + self.beta * total_kndvi_loss
+
     def get_config(self):
         config = super().get_config()
         config.update({
-            "smoothness_weight": self.smoothness_weight,
-            "curvature_weight": self.curvature_weight
+            'alpha': self.alpha,
+            'beta': self.beta,
+            'sigma': self.sigma
         })
         return config
+
+
+@keras.utils.register_keras_serializable(package="ConvLSTMSpline")
+class ImprovedkNDVILoss(keras.losses.Loss):
+    """
+    Enhanced kNDVI loss with improved convergence properties:
+    - Gradient clipping: Caps extreme kNDVI differences to prevent saturation
+    - Learned weights: Automatic loss component balancing via uncertainty weighting
+    - Cumulative loss: Supervises the trajectory to fix magnitude/sign bias
+    
+    Note: Temporal smoothness was removed as it encouraged constant predictions.
+    """
+    def __init__(
+        self, 
+        kndvi_clip=0.5,      # Max kNDVI difference (gradient clipping)
+        sigma=0.5,           # RBF kernel sigma
+        learn_weights=True,  # Enable learned loss weights
+        name='improved_kndvi_loss', 
+        **kwargs
+    ):
+        super().__init__(name=name, **kwargs)
+        self.kndvi_clip = kndvi_clip
+        self.sigma = sigma
+        self.learn_weights = learn_weights
+        
+        # Learned loss weights (log-variance parameterization)
+        if learn_weights:
+            self.log_var_reg = tf.Variable(0.0, trainable=True, name='log_var_reg')
+            self.log_var_kndvi = tf.Variable(0.0, trainable=True, name='log_var_kndvi')
+        
+        # Reduced Huber delta to 0.1 for stronger gradients on small delta errors
+        self.fn_huber = keras.losses.Huber(delta=0.1, reduction="none")
+
+
+
+    def kernel_function(self, n, r):
+        """RBF Kernel k(n, r) = exp(-(n-r)^2 / (2*sigma^2))"""
+        diff = n - r
+        return tf.exp(-tf.square(diff) / (2 * self.sigma ** 2))
+
+    def compute_kndvi(self, nir, red):
+        """kNDVI = (1 - k) / (1 + k)"""
+        k_val = self.kernel_function(nir, red)
+        return (1.0 - k_val) / (1.0 + k_val + 1e-6)
+
+    def call(self, y_true, y_pred):
+        # y_true: (batch, time, w, h, 9) - [mask(1), deltas(4), BAP(4)]
+        # y_pred: (batch, time, w, h, 4) - predicted deltas
+        
+        # --- Unpack ---
+        cloudmask = y_true[..., 0:1]
+        true_deltas = y_true[..., 1:5]
+        bap = y_true[..., 5:9]
+        pred_deltas = y_pred
+        
+        sample_weight = 1.0 - cloudmask
+        weight_sum = tf.reduce_sum(sample_weight) + 1e-6
+        
+        # --- 1. Regression Loss (Huber on Deltas) ---
+        reg_loss = self.fn_huber(true_deltas, pred_deltas)
+        masked_reg_loss = reg_loss * tf.squeeze(sample_weight, axis=-1)
+        total_reg_loss = tf.reduce_sum(masked_reg_loss) / weight_sum
+        
+        # --- 2. kNDVI Loss on Deltas ---
+        true_full = bap + true_deltas
+        pred_full = bap + pred_deltas
+        
+        true_red, true_nir = true_full[..., 2], true_full[..., 3]
+        pred_red, pred_nir = pred_full[..., 2], pred_full[..., 3]
+        
+        true_kndvi = self.compute_kndvi(true_nir, true_red)
+        pred_kndvi = self.compute_kndvi(pred_nir, pred_red)
+        
+        # Clipped L1 to prevent gradient explosion
+        kndvi_diff = tf.abs(true_kndvi - pred_kndvi)
+        kndvi_diff = tf.minimum(kndvi_diff, self.kndvi_clip)
+        
+        masked_kndvi_loss = kndvi_diff * tf.squeeze(sample_weight, axis=-1)
+        total_kndvi_loss = tf.reduce_sum(masked_kndvi_loss) / weight_sum
+        
+        # --- 3. Cumulative Loss (Trajectory Supervision) ---
+        # "Area under the curve" / Integral supervision
+        # Determines the total change over time, fixing magnitude/sign bias
+        true_cumsum = tf.cumsum(true_deltas, axis=1) # (B, Time, H, W, 4)
+        pred_cumsum = tf.cumsum(pred_deltas, axis=1)
+        
+        # We use Huber loss on the cumulative sums as well
+        cum_loss = self.fn_huber(true_cumsum, pred_cumsum)
+        masked_cum_loss = cum_loss * tf.squeeze(sample_weight, axis=-1)
+        total_cum_loss = tf.reduce_sum(masked_cum_loss) / weight_sum
+
+        # --- 4. Combine Losses ---
+        # Temporal smoothness was REMOVED as it encouraged constant predictions
+        if self.learn_weights:
+            # Uncertainty weighting
+            loss = (
+                tf.exp(-self.log_var_reg) * (total_reg_loss + total_cum_loss) + self.log_var_reg +
+                tf.exp(-self.log_var_kndvi) * total_kndvi_loss + self.log_var_kndvi
+            )
+        else:
+            loss = (total_reg_loss + total_cum_loss) + total_kndvi_loss
+        
+        return loss
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({
+            'kndvi_clip': self.kndvi_clip,
+            'sigma': self.sigma,
+            'learn_weights': self.learn_weights,
+        })
+        return config
+
