@@ -7,8 +7,8 @@ import tensorflow as tf
 import argparse
 
 from dataset import DatasetGenerator
-from build_model import build_eo_convlstm_model
-from losses import MaskedHuberLoss, kNDVILoss, ImprovedkNDVILoss
+from build_model import build_eo_convlstm_model, load_model
+from losses import MaskedHuberLoss, kNDVILoss, ImprovedkNDVILoss, EnablekNDVICallback
 from config import DATASET_PATH, VALIDATION_PATH
 
 
@@ -73,8 +73,8 @@ def train_bspline_model(
     generator = DatasetGenerator(train_dir)
     train_dataset = generator.get_dataset()
 
-    # Shuffle and Batch (buffer=100 for proper randomization)
-    train_dataset = train_dataset.shuffle(100).batch(batch_size).repeat()
+    # Shuffle and Batch (buffer=15 for proper randomization)
+    train_dataset = train_dataset.shuffle(15).batch(batch_size).repeat()
     # Apply mapping to match model inputs
     train_dataset = train_dataset.map(adapt_inputs, num_parallel_calls=tf.data.AUTOTUNE)
     train_dataset = train_dataset.prefetch(tf.data.AUTOTUNE)
@@ -91,13 +91,7 @@ def train_bspline_model(
     # 2. Model
     if resume_from:
         print(f"Resuming training from {resume_from}...")
-        model = keras.models.load_model(resume_from)
-        # Re-compile might be needed if custom objects were tricky, but usually load_model handles it if registered.
-        # Just to be safe regarding optimizer learning rate if we want to change it:
-        # model.compile(...) # Only if we want to override saved optimizer state.
-        # For now, let's respect the saved state but update LR if user asked? 
-        # Typically resume implies continuing exactly as is or with new schedule. 
-        # Let's keep it simple: load and run.
+        model = load_model(resume_from, compile=True)
     else:
         print("Creating EO ConvLSTM model...")
         model = build_eo_convlstm_model()
@@ -109,8 +103,7 @@ def train_bspline_model(
         )
         loss = ImprovedkNDVILoss(
             kndvi_clip=0.5,      # Gradient clipping threshold
-            sigma=0.5,           # RBF kernel sigma
-            learn_weights=True   # Enable uncertainty weighting
+            sigma=0.5            # RBF kernel sigma
         )
         model.compile(optimizer=optimizer, loss=loss)
 
@@ -133,6 +126,11 @@ def train_bspline_model(
             warmup_epochs=5,
             initial_lr=1e-5,
             target_lr=learning_rate
+        ),
+        # Enable kNDVI loss after regression has stabilized
+        EnablekNDVICallback(
+            enable_epoch=20,
+            kndvi_weight=1.0
         ),
         keras.callbacks.ModelCheckpoint(
             checkpoint_path,

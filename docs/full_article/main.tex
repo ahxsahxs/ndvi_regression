@@ -1,0 +1,87 @@
+\documentclass[12pt,a4paper]{report}
+
+% =============================================================================
+% PACKAGES
+% =============================================================================
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[english]{babel}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{cleveref}
+\usepackage{geometry}
+\usepackage{fancyhdr}
+\usepackage{setspace}
+\usepackage{natbib}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{float}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+\usepackage{lipsum}
+
+% =============================================================================
+% DOCUMENT SETTINGS
+% =============================================================================
+\geometry{
+    left=3cm,
+    right=2.5cm,
+    top=2.5cm,
+    bottom=2.5cm
+}
+
+\setstretch{1.5}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue,
+    citecolor=blue,
+    urlcolor=blue
+}
+
+% =============================================================================
+% TITLE INFORMATION
+% =============================================================================
+\title{
+    \textbf{Satellite NDVI Forecasting with Growth Curve Regression} \\
+    \vspace{0.5cm}
+    \large A Deep Learning Framework for Long-Horizon Vegetation Dynamics Prediction
+}
+\author{Antonio Henrique Xavier da Silva}
+\date{January 2026}
+
+% =============================================================================
+% DOCUMENT
+% =============================================================================
+\begin{document}
+
+% Title page
+\maketitle
+
+% Abstract
+\begin{abstract}
+This thesis presents a novel deep learning framework for forecasting vegetation dynamics using multi-spectral Sentinel-2 satellite imagery, meteorological data, and land cover classification. Unlike conventional approaches that predict vegetation states iteratively step-by-step, the proposed method learns complete growth curve trajectories to enable interpretable 100-day forecasts. The architecture combines ConvLSTM-based spatiotemporal encoding with a parametric growth curve decoder, predicting saturation growth parameters (amplitude, rate, and offset) that model vegetation phenology explicitly. Trained on the GreenEarthNet benchmark dataset, the model demonstrates competitive performance while maintaining significantly fewer parameters than transformer-based alternatives. The growth curve formulation provides inherent interpretability, enabling analysis of predicted vegetation dynamics in terms of biophysically meaningful parameters.
+\end{abstract}
+
+% Table of contents
+\tableofcontents
+\listoffigures
+\listoftables
+
+% =============================================================================
+% CHAPTERS
+% =============================================================================
+\include{01_introduction}
+\include{02_literature_review}
+\include{03_materials_methods}
+\include{04_results}
+
+% =============================================================================
+% BIBLIOGRAPHY
+% =============================================================================
+\bibliographystyle{apalike}
+\bibliography{references}
+
+\end{document}

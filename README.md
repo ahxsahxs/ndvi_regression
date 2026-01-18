@@ -1,15 +1,15 @@
-# Satellite NDVI Forecasting with Parametric ConvLSTM
+# Satellite NDVI Forecasting with Growth Curve Regression
 
-A deep learning framework for predicting vegetation dynamics using multi-spectral Sentinel-2 imagery, weather data, and a parametric curve decoder.
+A deep learning framework for predicting vegetation dynamics using multi-spectral Sentinel-2 imagery, weather data, and a growth curve decoder.
 
 ## Overview
 
-This project implements a spatiotemporal encoder-decoder model that forecasts vegetation changes over a 60-day horizon using:
-- **Historical Sentinel-2 observations** (18 frames over 90 days)
+This project implements a spatiotemporal encoder-decoder model that forecasts vegetation changes over a 100-day horizon using:
+- **Historical Sentinel-2 observations** (10 frames over 50 days)
 - **E-OBS climate variables** (7 weather features with climatology-based processing)
 - **ESA WorldCover land classification**
 
-The model uses ConvLSTM layers to extract spatiotemporal patterns and predicts reflectance deltas via a parametric polynomial curve that passes through the origin.
+The model uses ConvLSTM layers to extract spatiotemporal patterns and predicts reflectance deltas via a saturation growth curve with weather-adjusted rates.
 
 ---
 
@@ -22,19 +22,19 @@ The project uses NetCDF (`.nc`) files containing multi-modal Earth observation d
 
 | Feature | Shape | Description |
 |---------|-------|-------------|
-| **Sentinel-2 Bands** | `(18, 128, 128, 4)` | B02 (Blue), B03 (Green), B04 (Red), B8A (NIR) |
-| **Cloud Mask** | `(18, 128, 128, 1)` | Binary mask (1 = cloudy/invalid, 0 = clear) |
+| **Sentinel-2 Bands** | `(10, 128, 128, 4)` | B02 (Blue), B03 (Green), B04 (Red), B8A (NIR) |
+| **Cloud Mask** | `(10, 128, 128, 1)` | Binary mask (1 = cloudy/invalid, 0 = clear) |
 | **Land Cover** | `(128, 128, 10)` | One-hot encoded ESA WorldCover classes |
 | **Temporal Metadata** | `(3,)` | Normalized year, sin(day-of-year), cos(day-of-year) |
-| **Weather Features** | `(12, 21)` | E-OBS climate variables (7 vars × 3 aggregations) |
+| **Weather Features** | `(20, 21)` | E-OBS climate variables (7 vars × 3 aggregations) |
 
 ### Target Output
 
 | Component | Shape | Description |
 |-----------|-------|-------------|
-| **Cloud Mask** | `(12, 128, 128, 1)` | Validity mask for target frames |
-| **Reflectance Deltas** | `(12, 128, 128, 4)` | Change from Best Available Pixel (BAP) |
-| **BAP Composite** | `(12, 128, 128, 4)` | Reference image for reconstruction |
+| **Cloud Mask** | `(20, 128, 128, 1)` | Validity mask for target frames |
+| **Reflectance Deltas** | `(20, 128, 128, 4)` | Change from Best Available Pixel (BAP) |
+| **BAP Composite** | `(20, 128, 128, 4)` | Reference image for reconstruction |
 
 ---
 
@@ -42,11 +42,11 @@ The project uses NetCDF (`.nc`) files containing multi-modal Earth observation d
 
 ### 1. Sentinel-2 Preprocessing
 ```
-Raw Observations → NaN Detection → Cloud Masking → Temporal Slicing (every 5 days)
+Raw Observations → NaN Detection → Cloud Masking → Temporal Slicing (every 5 days) → BAP Composite
 ```
-- **Temporal sampling**: Extracts every 5th day from day 4 (input) and day 94 (target)
+- **Temporal sampling**: Extracts every 5th day from day 4 (input: 10 frames) and day 54 (target: 20 frames)
 - **NaN handling**: Missing values are merged into the cloud mask and replaced with zeros
-- **BAP composite**: Best Available Pixel method iterates backwards to find cloud-free pixels
+- **BAP composite**: Best Available Pixel method iterates backwards through the sequence to fill cloudy pixels with the most recent clear observation. Applied to both input and target data.
 
 ### 2. Temporal Feature Engineering
 - **Year normalization**: `(year - 2017) / 4` for 2017–2021 range
@@ -76,70 +76,121 @@ Raw Observations → NaN Detection → Cloud Masking → Temporal Slicing (every
 
 ## Model Architecture
 
-### Encoder (ConvLSTM)
-```
-Input Concatenation: [Sentinel-2 (4) + CloudMask (1) + LandCover (10)] = 15 channels
-    ↓
-ConvLSTM2D(32 filters, 3×3 kernel, return_sequences=True) + BatchNorm
-    ↓
-ConvLSTM2D(64 filters, 3×3 kernel, return_sequences=False) + BatchNorm
-    ↓
-Context Volume: (Batch, 128, 128, 64)
+The model uses a **Growth Curve Regression** architecture that predicts reflectance deltas via interpretable saturation growth parameters.
+
+### High-Level Architecture
+
+```mermaid
+flowchart TB
+    subgraph Inputs["Input Tensors"]
+        S2["Sentinel-2<br>(10, 128, 128, 4)"]
+        CM["Cloud Mask<br>(10, 128, 128, 1)"]
+        LC["Land Cover<br>(128, 128, 10)"]
+        TM["Temporal Meta<br>(3,)"]
+        WX["Weather<br>(20, 21)"]
+    end
+
+    subgraph Encoder["Latent Space Encoder"]
+        CONCAT["Concatenate<br>14 channels"]
+        GATE["CloudAwareGatingLayer"]
+        LSTM1["ConvLSTM2D(32)"]
+        LSTM2["ConvLSTM2D(48)"]
+        LSTM3["ConvLSTM2D(64)"]
+        SKIP["Skip Connection"]
+        FUSE["Latent Fusion<br>(B, 128, 128, 112)"]
+    end
+
+    subgraph Decoder["Growth Curve Decoder"]
+        RPH["RegressionParameterHead<br>A, λ, B"]
+        WTM["WeatherTimeAdjustmentMLP<br>adj(t)"]
+        GCL["GrowthCurveLayer<br>δ(t) = A(1-e^-λt) + B"]
+        SSL["SpatialSmoothingLayer"]
+    end
+
+    OUT["Output Deltas<br>(20, 128, 128, 4)"]
+
+    S2 --> CONCAT
+    CM --> GATE
+    LC --> CONCAT
+    CONCAT --> GATE
+    GATE --> LSTM1 --> LSTM2 --> LSTM3
+    LSTM2 --> SKIP
+    LSTM3 --> FUSE
+    SKIP --> FUSE
+    FUSE --> RPH
+    TM --> WTM
+    WX --> WTM
+    RPH --> GCL
+    WTM --> GCL
+    GCL --> SSL --> OUT
 ```
 
-### Multi-modal Fusion
-```
-Temporal Embedding: Dense(16) on last timestep metadata
-Weather Embedding:  Dense(16) → Mean over output steps
-    ↓
-Spatial Broadcasting: Tile embeddings to (H, W) and concatenate with context
-    ↓
-Fused Context: (Batch, 128, 128, 96)  [64 + 16 + 16]
-```
+### Regression Parameter Head
 
-### Parametric Decoder
-Instead of a recurrent decoder, the model predicts **polynomial coefficients** for a parametric curve:
+Generates triplet parameters **(A, λ, B)** per pixel per band:
 
-```
-Conv2D(64, 3×3, ReLU) + BatchNorm
-    ↓
-Conv2D(12, 1×1)  → Coefficients (4 bands × 3 degrees)
-    ↓
-ParametricEvalLayer → Evaluates cubic curve at 12 output timesteps
-```
+| Parameter | Activation | Description |
+|-----------|------------|-------------|
+| **A** (amplitude) | `tanh × scale` | Bounded, can be ± |
+| **λ** (rate) | `sigmoid → [λ_min, λ_max]` | Growth rate > 0 |
+| **B** (offset) | `tanh × 0.1` | Baseline [-0.1, 0.1] |
 
-**Curve definition** (passes through origin):
+### Growth Curve Formula
+
 ```math
-y(t) = w_3 t^3 + w_2 t^2 + w_1 t
+δ(t) = A · (1 - exp(-λ · T · t · adj(t))) + B
 ```
 
-Evaluation uses Horner's method for numerical stability.
+- `t ∈ [0, 1]` — normalized time
+- `T = 20` — output timesteps  
+- `adj(t) ∈ [0.5, 1.5]` — weather/time adjustment
 
 ---
 
-## Loss Function: kNDVI Loss
+## Loss Function: ImprovedkNDVILoss
 
-The `kNDVILoss` combines regression accuracy with vegetation index prediction.
+The `ImprovedkNDVILoss` combines regression accuracy with variance preservation and spectral consistency.
 
 ### Components
 
+All components are normalized to similar scales (~0.01-0.1) before weighting:
+
+| Component | Default Weight | Description |
+|-----------|----------------|-------------|
+| **Regression** | 10.0 | Primary objective (Huber δ=0.1) |
+| **Variance Penalty** | 1.0 | Regularizer to prevent mode collapse |
+| **kNDVI** | 0.0 → 1.0 | Auxiliary loss (enabled via callback) |
+
 1. **Masked Huber Loss** (on reflectance deltas):
    ```python
-   L_reg = HuberLoss(true_deltas, pred_deltas) × (1 - cloudmask)
+   L_reg = HuberLoss(δ=0.1)(true_deltas, pred_deltas) × (1 - cloudmask)
    ```
 
-2. **kNDVI Loss** (kernel NDVI using RBF):
+2. **Variance Penalty** (prevents constant predictions):
+   ```python
+   var_true = spatial_variance(true_deltas)
+   var_pred = spatial_variance(pred_deltas)
+   L_var = |var_true - var_pred| × 100  # scaled to match regression range
+   ```
+
+3. **kNDVI Loss** (kernel NDVI using RBF):
    ```python
    k(n, r) = exp(-(n - r)² / 2σ²)
    kNDVI = (1 - k) / (1 + k)
-   L_kndvi = |kNDVI_true - kNDVI_pred| × (1 - cloudmask)
+   L_kndvi = min(|kNDVI_true - kNDVI_pred|, 0.5) × 0.1  # clipped and scaled
    ```
 
 ### Combined Loss
 ```python
-L_total = α × L_reg + β × L_kndvi
+L_total = w_reg × L_reg + w_var × L_var + w_kndvi × L_kndvi
 ```
-Default: `α=0.5`, `β=1.0`, `σ=0.5`
+
+### EnablekNDVICallback
+The kNDVI component is disabled during initial training (warmup) and enabled after a specified epoch via `EnablekNDVICallback`:
+
+```python
+EnablekNDVICallback(enable_epoch=20, kndvi_weight=1.0)
+```
 
 ### Reconstruction
 Full reflectance is reconstructed as `BAP + deltas`, allowing kNDVI computation on absolute values while training on relative changes.

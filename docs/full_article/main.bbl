@@ -1,0 +1,69 @@
+\begin{thebibliography}{}
+
+\bibitem[Aleissaee et~al., 2023]{aleissaee2023transformers}
+Aleissaee, A.~A., Kumar, A., Anwer, R.~M., Khan, S., Cholakkal, H., Xia, G.-S.,
+  and Khan, F.~S. (2023).
+\newblock Transformers in remote sensing: A survey.
+\newblock {\em Remote Sensing}, 15(7):1860.
+
+\bibitem[Bazi et~al., 2021]{bazi2021vision}
+Bazi, Y., Bashmal, L., Rahhal, M. M.~A., Dayil, R.~A., and Ajlan, N.~A. (2021).
+\newblock Vision transformers for remote sensing image classification.
+\newblock {\em Remote Sensing}, 13(3):516.
+
+\bibitem[Benson et~al., 2024]{benson2024multimodal}
+Benson, V., Robin, C., Requena-Mesa, C., Alonso, L., Carvalhais, N., Cortés,
+  J., Gao, Z., Linscheid, N., Weynants, M., and Reichstein, M. (2024).
+\newblock Multi-modal learning for geospatial vegetation forecasting.
+\newblock In {\em Proceedings of the IEEE/CVF Conference on Computer Vision and
+  Pattern Recognition (CVPR)}, pages 27788--27799.
+
+\bibitem[Camps-Valls et~al., 2021]{camps2021unified}
+Camps-Valls, G., Campos-Taberner, M., Moreno-Mart{\'\i}nez, {\'A}., Walber, S.,
+  Duber, G., Claverie, M., Mahecha, M.~D., et~al. (2021).
+\newblock A unified vegetation index for quantifying the terrestrial biosphere.
+\newblock {\em Science Advances}, 7(9):eabc7447.
+
+\bibitem[Dosovitskiy et~al., 2020]{dosovitskiy2020image}
+Dosovitskiy, A., Beyer, L., Kolesnikov, A., Weissenborn, D., Zhai, X.,
+  Unterthiner, T., Dehghani, M., Minderer, M., Heigold, G., Gelly, S., et~al.
+  (2020).
+\newblock An image is worth 16x16 words: Transformers for image recognition at
+  scale.
+\newblock {\em arXiv preprint arXiv:2010.11929}.
+
+\bibitem[Liu et~al., 2021]{liu2021swin}
+Liu, Z., Lin, Y., Cao, Y., Hu, H., Wei, Y., Zhang, Z., Lin, S., and Guo, B.
+  (2021).
+\newblock Swin transformer: Hierarchical vision transformer using shifted
+  windows.
+\newblock In {\em Proceedings of the IEEE/CVF International Conference on
+  Computer Vision (ICCV)}, pages 10012--10022.
+
+\bibitem[MacDonald et~al., 2024]{macdonald2024vistaformer}
+MacDonald, E., Jacoby, D., and Coady, Y. (2024).
+\newblock Vistaformer: Scalable vision transformers for satellite image time
+  series segmentation.
+\newblock {\em arXiv preprint arXiv:2409.08461}.
+
+\bibitem[Pellicer-Valero et~al., 2024]{pellicer2024explainable}
+Pellicer-Valero, O.~J., Robin, C., and Reichstein, M. (2024).
+\newblock Explainable earth surface forecasting under extreme events.
+\newblock {\em Earth's Future}, 12:e2024EF005446.
+\newblock Main architectural inspiration for growth curve decoder.
+
+\bibitem[Tarasiou et~al., 2023]{tarasiou2023vits}
+Tarasiou, M., Chavez, E., and Zafeiriou, S. (2023).
+\newblock Vits for sits: Vision transformers for satellite image time series.
+\newblock In {\em Proceedings of the IEEE/CVF Conference on Computer Vision and
+  Pattern Recognition (CVPR)}, pages 10418--10428.
+
+\bibitem[Wang et~al., 2021]{wang2021pyramid}
+Wang, W., Xie, E., Li, X., Fan, D.-P., Song, K., Liang, D., Lu, T., Luo, P.,
+  and Shao, L. (2021).
+\newblock Pyramid vision transformer: A versatile backbone for dense prediction
+  without convolutions.
+\newblock In {\em 2021 IEEE/CVF International Conference on Computer Vision
+  (ICCV)}, pages 548--558.
+
+\end{thebibliography}

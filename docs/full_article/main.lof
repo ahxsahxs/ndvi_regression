@@ -1,0 +1,10 @@
+\babel@toc {english}{}\relax 
+\addvspace {10\p@ }
+\addvspace {10\p@ }
+\addvspace {10\p@ }
+\contentsline {figure}{\numberline {3.1}{\ignorespaces Model architecture overview showing the encoder-decoder structure with growth curve parameterization.\relax }}{20}{figure.caption.10}%
+\addvspace {10\p@ }
+\contentsline {figure}{\numberline {4.1}{\ignorespaces Prediction error evolution over the 100-day forecast horizon, stacked by spectral band. Each bar represents a 5-day forecast interval.\relax }}{29}{figure.caption.18}%
+\contentsline {figure}{\numberline {4.2}{\ignorespaces Spatial distribution of mean absolute error, averaged across samples and forecast timesteps.\relax }}{30}{figure.caption.19}%
+\contentsline {figure}{\numberline {4.3}{\ignorespaces Sample 1: Ground truth (top row) vs. predicted (bottom row) reflectance deltas across forecast timesteps. RGB visualization maps delta values to color channels.\relax }}{32}{figure.caption.20}%
+\contentsline {figure}{\numberline {4.4}{\ignorespaces Sample 2: Ground truth (top row) vs. predicted (bottom row) reflectance deltas across forecast timesteps.\relax }}{33}{figure.caption.21}%

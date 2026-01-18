@@ -1,18 +1,17 @@
 import os
 # Force CPU to avoid XLA/CUDA JIT errors with Sign op
 os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+import argparse
 import tensorflow as tf
 import keras
 import numpy as np
 import matplotlib.pyplot as plt
 from dataset import DatasetGenerator
 from losses import MaskedHuberLoss, ImprovedkNDVILoss, kNDVILoss
-from build_model import (
-    build_eo_convlstm_model, 
-    BSplineBasisLayer, 
-    BroadcastFusionLayer
-)
+from build_model import load_model
 from config import DATASET_PATH
+
+CHECKPOINTS_DIR = "/home/me/workspace/bspline_ndvi/checkpoints"
 
 def adapt_inputs(x, y):
     # Same logic as train.py
@@ -26,8 +25,11 @@ def adapt_inputs(x, y):
     }
     return x_new, y
 
-def visualize():
-    model_path = "/home/me/workspace/bspline_ndvi/checkpoints/final_model.keras"
+def visualize(model_epoch=None):
+    if model_epoch is None:
+        model_path = os.path.join(CHECKPOINTS_DIR, "final_model.keras")
+    else:
+        model_path = os.path.join(CHECKPOINTS_DIR, f"model_at_{model_epoch}.keras")
     if not os.path.exists(model_path):
         print(f"Model not found at {model_path}")
         return
@@ -37,41 +39,10 @@ def visualize():
     os.makedirs(output_dir, exist_ok=True)
     print(f"Output directory: {output_dir}")
 
-    print(f"Loading full model from {model_path}...")
+    print(f"Loading model from {model_path}...")
     try:
-        # MONKEYPATCH: Handle 'quantization_config' argument mismatch
-        # The checkpoint seems to use a version of Keras with quantization support,
-        # but the current environment does not. We patch Dense.__init__ to ignore it.
-        original_dense_init = keras.layers.Dense.__init__
-        def patched_dense_init(self, *args, **kwargs):
-            if 'quantization_config' in kwargs:
-                kwargs.pop('quantization_config')
-            original_dense_init(self, *args, **kwargs)
-            
-        # Apply patch
-        keras.layers.Dense.__init__ = patched_dense_init
-
-        # Define valid custom objects
-        custom_objects = {
-            'BSplineBasisLayer': BSplineBasisLayer,
-            'BroadcastFusionLayer': BroadcastFusionLayer,
-            'MaskedHuberLoss': MaskedHuberLoss,
-            'ImprovedkNDVILoss': ImprovedkNDVILoss,
-            'kNDVILoss': kNDVILoss
-        }
-        
-        # Load the model with its own architecture
-        model = keras.models.load_model(model_path, custom_objects=custom_objects, compile=False)
+        model = load_model(model_path, compile=False)
         print("Model loaded successfully.")
-        
-        # Revert patch
-        keras.layers.Dense.__init__ = original_dense_init
-        
-    except Exception as e:
-        print(f"Failed to load model: {e}")
-        return
-        print("Model loaded successfully.")
-        
     except Exception as e:
         print(f"Failed to load model: {e}")
         return
@@ -91,67 +62,118 @@ def visualize():
         
         # Handle multi-output models (e.g. if model has sign branch)
         if isinstance(y_pred, list):
-            # Assuming first output is the deltas (main output)
-            # Adjust if your architecture is different.
-            # Usually regression output is 1st or named.
-            # Let's inspect shape to be sure?
-            # For now, taking [0] is a safe bet for regression part if list.
             print(f"  Model returned list of outputs. Using first one.")
             pred_deltas = y_pred[0]
         else:
             pred_deltas = y_pred
+        
+        # Extract data from batch
+        # X input: sentinel2 sequence - shape (1, T_in, 128, 128, 4) -> bands B02, B03, B04, B8A
+        x_sentinel = x_batch['sentinel2_sequence'][0].numpy()  # (T_in, 128, 128, 4)
+        
+        # Y output: shape (1, 12, 128, 128, 9) 
+        # Channels: 0=mask, 1-4=deltas (B02,B03,B04,B8A), 5-8=BAP (B02,B03,B04,B8A)
+        y_data = y_batch[0].numpy()  # (12, 128, 128, 9)
+        cloudmask = y_data[:, :, :, 0]      # Channel 0 is mask
+        true_deltas = y_data[:, :, :, 1:5]  # Channels 1-4 are deltas
+        y_bap = y_data[:, :, :, 5:9]        # Channels 5-8 are BAP composite (for RGB)
+        
+        pred_deltas = pred_deltas[0]  # (12, 128, 128, 4)
+        
+        # Calculate and print variance of predictions
+        delta_std = np.std(pred_deltas, axis=(1, 2)) 
+        print(f"  Predicted Delta Spatial Std (Time 0, Band 0): {delta_std[0, 0]:.6f}")
+        
+        # Helper to create RGB from bands (B02=Blue, B03=Green, B04=Red)
+        # Band order in data: 0=B02, 1=B03, 2=B04, 3=B8A
+        def make_rgb(data, clip_min=0.0, clip_max=0.3):
+            """Create RGB image from bands. data shape: (H, W, 4)"""
+            rgb = np.stack([
+                data[:, :, 2],  # R = B04
+                data[:, :, 1],  # G = B03
+                data[:, :, 0],  # B = B02
+            ], axis=-1)
+            # Normalize to 0-1 range for display
+            rgb = np.clip((rgb - clip_min) / (clip_max - clip_min), 0, 1)
+            return rgb
+        
+        def make_delta_rgb(data, mask=None):
+            """Create RGB visualization from delta bands. data shape: (H, W, 4)
+            Masked pixels (mask=1) are shown in magenta."""
+            rgb = np.stack([
+                data[:, :, 2],  # R = B04 delta
+                data[:, :, 1],  # G = B03 delta
+                data[:, :, 0],  # B = B02 delta
+            ], axis=-1)
+            # Normalize deltas: map [-0.1, 0.1] to [0, 1] for visualization
+            rgb = np.clip((rgb + 0.1) / 0.2, 0, 1)
+            # Apply cloud mask: show masked pixels in magenta
+            if mask is not None:
+                mask_3d = np.expand_dims(mask, axis=-1)
+                magenta = np.array([1.0, 0.0, 1.0])
+                rgb = np.where(mask_3d > 0.5, magenta, rgb)
+            return rgb
+        
+        # Select 5 timesteps to display
+        n_cols = 5
+        timesteps_x = np.linspace(0, x_sentinel.shape[0] - 1, n_cols, dtype=int)
+        timesteps_y = np.linspace(0, y_data.shape[0] - 1, n_cols, dtype=int)
+        
+        # Create 4x5 grid
+        fig, axes = plt.subplots(4, n_cols, figsize=(3 * n_cols, 3 * 4))
+        fig.suptitle(f"Sample {sample_idx}", fontsize=16)
+        
+        row_labels = ['X Input (RGB)', 'Y Output (RGB)', 'True Delta (RGB)', 'Pred Delta (RGB)']
+        
+        for col_idx in range(n_cols):
+            # Row 0: X input RGB
+            t_x = timesteps_x[col_idx]
+            rgb_x = make_rgb(x_sentinel[t_x])
+            axes[0, col_idx].imshow(rgb_x)
+            axes[0, col_idx].set_title(f"t={t_x}")
+            axes[0, col_idx].axis('off')
             
-        # Check shapes
-        # y_batch shape: (1, 12, 128, 128, 9)
-        # pred_deltas shape: (1, 12, 128, 128, 4)
-        
-        true_deltas = y_batch[0, :, :, :, 1:5].numpy()  # Channels 1-4 are deltas
-        cloudmask = y_batch[0, :, :, :, 0].numpy()     # Channel 0 is mask
-        
-        pred_deltas = pred_deltas[0]                   # (12, 128, 128, 4)
-        
-        # Plotting
-        # We'll plot 3 timesteps: Start, Middle, End
-        timesteps = [0, 5, 11]
-        # Let's plot B04 (Red) -> index 2
-        band_idx = 2
-        band_name = "B04"
-
-        rows = len(timesteps)
-        cols = 3  # True, Pred, Cloudmask
-        
-        fig, axes = plt.subplots(rows, cols, figsize=(12, 4 * rows))
-        fig.suptitle(f"Delta Predictions ({band_name}) - Sample {sample_idx}", fontsize=16)
-        
-        for i, t in enumerate(timesteps):
-            # True
-            ax_true = axes[i, 0]
-            val_min, val_max = -0.1, 0.1
-            im_true = ax_true.imshow(true_deltas[t, :, :, band_idx], cmap='RdBu', vmin=val_min, vmax=val_max)
-            ax_true.set_title(f"True Delta (t={t})")
-            plt.colorbar(im_true, ax=ax_true)
+            # Row 1: Y output RGB (BAP composite)
+            t_y = timesteps_y[col_idx]
+            rgb_y = make_rgb(y_bap[t_y])
+            axes[1, col_idx].imshow(rgb_y)
+            axes[1, col_idx].set_title(f"t={t_y}")
+            axes[1, col_idx].axis('off')
             
-            # Pred
-            ax_pred = axes[i, 1]
-            im_pred = ax_pred.imshow(pred_deltas[t, :, :, band_idx], cmap='RdBu', vmin=val_min, vmax=val_max)
-            ax_pred.set_title(f"Pred Delta (t={t})")
-            plt.colorbar(im_pred, ax=ax_pred)
+            # Row 2: True delta RGB (with cloud mask)
+            delta_true_rgb = make_delta_rgb(true_deltas[t_y], cloudmask[t_y])
+            axes[2, col_idx].imshow(delta_true_rgb)
+            axes[2, col_idx].set_title(f"t={t_y}")
+            axes[2, col_idx].axis('off')
             
-            # Mask
-            ax_mask = axes[i, 2]
-            im_mask = ax_mask.imshow(cloudmask[t, :, :], cmap='gray', vmin=0, vmax=1)
-            ax_mask.set_title(f"Cloudmask (t={t})")
-            plt.colorbar(im_mask, ax=ax_mask)
-            
+            # Row 3: Predicted delta RGB (no cloud mask - show raw predictions)
+            delta_pred_rgb = make_delta_rgb(pred_deltas[t_y])
+            axes[3, col_idx].imshow(delta_pred_rgb)
+            axes[3, col_idx].set_title(f"t={t_y}")
+            axes[3, col_idx].axis('off')
+        
+        # Add row labels on the left
+        for row_idx, label in enumerate(row_labels):
+            axes[row_idx, 0].set_ylabel(label, fontsize=12, rotation=90, labelpad=10)
+            axes[row_idx, 0].yaxis.set_label_position('left')
+        
         plt.tight_layout()
         save_path = os.path.join(output_dir, f"sample_{sample_idx:04d}.png")
-        plt.savefig(save_path)
+        plt.savefig(save_path, dpi=150)
         plt.close()
         
-        if sample_idx >= 5: # Limit to 5 samples
+        if sample_idx >= 5:  # Limit to 5 samples
             break
     
     print(f"Generated images in {output_dir}")
 
 if __name__ == "__main__":
-    visualize()
+    parser = argparse.ArgumentParser(description="Visualize model predictions.")
+    parser.add_argument(
+        "--model",
+        type=int,
+        default=None,
+        help="Epoch number to load model_at_{epoch}.keras. If not specified, loads final_model.keras."
+    )
+    args = parser.parse_args()
+    visualize(model_epoch=args.model)

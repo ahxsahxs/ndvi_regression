@@ -6,12 +6,33 @@ import pandas as pd
 from pathlib import Path
 import tensorflow as tf
 
-def percentile_contrast(data: np.ndarray, p_min:int, p_max:int):
+def percentile_contrast(data: np.ndarray, p_min: int, p_max: int) -> np.ndarray:
+    """
+    Applies percentile-based contrast stretching to data.
+
+    :param data: Input array to normalize.
+    :type data: np.ndarray
+    :param p_min: Lower percentile for clipping.
+    :type p_min: int
+    :param p_max: Upper percentile for clipping.
+    :type p_max: int
+    :return: Normalized array scaled to [0, 1].
+    :rtype: np.ndarray
+    """
     val_min, val_max = np.nanpercentile(data, [p_min, p_max])
     clipped_data = np.clip(data, val_min, val_max)
     return (clipped_data - val_min) / (val_max - val_min)
 
-def scale_to_01(data: np.ndarray):
+
+def scale_to_01(data: np.ndarray) -> np.ndarray:
+    """
+    Scales data to [0, 1] range using min-max normalization.
+
+    :param data: Input array to normalize.
+    :type data: np.ndarray
+    :return: Normalized array scaled to [0, 1].
+    :rtype: np.ndarray
+    """
     val_min = np.nanmin(data)
     val_max = np.nanmax(data)
     return (data - val_min) / (val_max - val_min)
@@ -37,9 +58,20 @@ class DatasetGenerator:
     def __init__(
             self,
             data_dir: str | Path,
-            input_days: int = 90,
-            target_days: int = 60
+            input_days: int = 50,
+            target_days: int = 100
         ) -> None:
+        """
+        Initializes the DatasetGenerator.
+
+        :param data_dir: Directory containing GreenEarthNet .nc files.
+        :type data_dir: str | Path
+        :param input_days: Number of input days (sampled every 5 days).
+        :type input_days: int
+        :param target_days: Number of target days to predict.
+        :type target_days: int
+        :raises ValueError: If no .nc files are found in data_dir.
+        """
         self.data_dir = data_dir
         self.files = sorted(glob.glob(os.path.join(data_dir, "**/*.nc"), recursive=True))
         
@@ -49,73 +81,76 @@ class DatasetGenerator:
         self.input_days = input_days
         self.target_days = target_days
 
-    def prepare_sentinel_for_slice(self, dataset: xr.Dataset, time_slice:slice)->tuple[np.ndarray, np.ndarray]:
-        # 1. Sentinel-2 Bands
+    def prepare_sentinel_for_slice(
+            self, dataset: xr.Dataset, time_slice: slice
+        ) -> tuple[np.ndarray, np.ndarray]:
+        """
+        Extracts Sentinel-2 bands and cloud mask for a time slice.
+
+        :param dataset: xarray Dataset containing satellite data.
+        :type dataset: xr.Dataset
+        :param time_slice: Slice object specifying time range.
+        :type time_slice: slice
+        :return: Tuple of (sentinel2, cloudmask) arrays.
+                 sentinel2: (T, H, W, 4) reflectance values.
+                 cloudmask: (T, H, W, 1) where 1=cloudy/invalid.
+        :rtype: tuple[np.ndarray, np.ndarray]
+        """
         s2_data = []
         for band in self.S2_BANDS:
             b_data = dataset[band].isel(time=time_slice).values
             s2_data.append(b_data)
         
-        # (10, 128, 128, 4)
-        sentinel2 = np.stack(s2_data, axis=-1)
-        # sentinel2 = scale_to_01(sentinel2)
+        sentinel2 = np.stack(s2_data, axis=-1)  # (T, 128, 128, 4)
+        s2_nans = np.isnan(sentinel2).any(axis=-1, keepdims=True)
 
-        # If any band is NaN, the pixel is missing/invalid
-        s2_nans = np.isnan(sentinel2).any(axis=-1, keepdims=True) # (10, 128, 128, 1)
-
-        # 2. Cloud Mask
-        # mask > 0 means cloud/shadow etc.
+        # Cloud mask: mask > 0 means cloud/shadow
         mask = dataset[self.S2_MASK].isel(time=time_slice).values
         s2_mask = (mask > 0).astype(np.float32)
-        s2_mask = np.expand_dims(s2_mask, axis=-1) # (10, 128, 128, 1)
+        s2_mask = np.expand_dims(s2_mask, axis=-1)
 
-        # Update mask to include NaNs (missing data)
-        # If s2_nans is True, s2_mask should be 1 (masked)
+        # Include NaNs in mask
         s2_mask = np.maximum(s2_mask, s2_nans.astype(np.float32))
-
-        # Replace NaNs with 0
         sentinel2 = np.nan_to_num(sentinel2, nan=0)
 
         return sentinel2, s2_mask
 
     def prepare_x(self, dataset: xr.Dataset) -> dict:
-        # --- Inputs (First 50 days, starting at index 4) ---
-        input_slice = slice(4, self.input_days, 5)
-        
-        sentinel2, s2_mask = self.prepare_sentinel_for_slice(dataset, input_slice)
+        """
+        Prepares all input features for the model.
 
-        # 6. Landcover (ESA WorldCover)
-        esawc_lc = dataset['esawc_lc'].values # (128, 128)
+        :param dataset: xarray Dataset containing satellite and ancillary data.
+        :type dataset: xr.Dataset
+        :return: Dictionary with keys: 'time', 'sentinel2', 'cloudmask',
+                 'landcover', 'weather'.
+        :rtype: dict
+        """
+        input_slice = slice(4, self.input_days, 5)
+        sentinel2, s2_mask = self.prepare_sentinel_for_slice(dataset, input_slice)
         
-        # One-hot encoding
+        # Fill cloudy pixels with last clear observation
+        sentinel2_bap = self.compute_bap_sequence(sentinel2, s2_mask)
+
+        # Landcover one-hot encoding
+        esawc_lc = dataset['esawc_lc'].values
         lc_indices = np.searchsorted(self.ESA_CLASSES, esawc_lc)
         lc_indices = np.clip(lc_indices, 0, len(self.ESA_CLASSES) - 1)
-        lc_one_hot = np.eye(len(self.ESA_CLASSES))[lc_indices] # (128, 128, 11)
+        lc_one_hot = np.eye(len(self.ESA_CLASSES))[lc_indices]
+        esawc_lc = lc_one_hot[..., 1:].astype(np.float32)  # (128, 128, 10)
         
-        # Drop the first class to get n_classes-1
-        esawc_lc = lc_one_hot[..., 1:].astype(np.float32) # (128, 128, 10)
-        
-        # 7. Time
+        # Temporal features
         times = dataset.time.isel(time=input_slice).values
         ts = pd.to_datetime(times)
-        
-        # Normalize year (2017-2021)
         year_norm = (ts.year - 2017) / (2021 - 2017)
-        
-        # Cyclic day of year
         days_in_year = np.where(ts.is_leap_year, 366, 365)
         doy_rad = 2 * np.pi * ts.day_of_year / days_in_year
-        sin_doy = np.sin(doy_rad)
-        cos_doy = np.cos(doy_rad)
+        time_feats = np.stack([year_norm, np.sin(doy_rad), np.cos(doy_rad)], axis=-1).astype(np.float32)
         
-        time_feats = np.stack([year_norm, sin_doy, cos_doy], axis=-1).astype(np.float32) 
-        
-        # Prepare weather features
         weather_feats = self.prepare_weather(dataset)
         
         return {
             "time": time_feats,
-            "sentinel2": sentinel2,
+            "sentinel2": sentinel2_bap,
             "cloudmask": s2_mask,
             "landcover": esawc_lc,
             "weather": weather_feats
@@ -124,14 +159,16 @@ class DatasetGenerator:
     def prepare_weather(self, dataset: xr.Dataset) -> np.ndarray:
         """
         Prepares weather features from E-OBS variables using climatology-based aggregation.
-        
+
         For each 5-day forecast step, computes 3 aggregations per variable:
         - min_detrend: Minimum anomaly (value - climatology) over 5 days
         - max_detrend: Maximum anomaly over 5 days
         - mean_clima: Mean climatology value over 5 days
-        
-        Returns:
-            weather_feats: (target_steps, 21) where 21 = 7 vars × 3 aggregations
+
+        :param dataset: xarray Dataset containing E-OBS weather variables.
+        :type dataset: xr.Dataset
+        :return: Weather features array (target_steps, 21) where 21 = 7 vars × 3 aggs.
+        :rtype: np.ndarray
         """
         target_days = self.target_days
         n_output_steps = target_days // 5
@@ -207,66 +244,98 @@ class DatasetGenerator:
         return weather_feats
 
 
+    def compute_bap_sequence(self, sentinel2: np.ndarray, cloudmask: np.ndarray) -> np.ndarray:
+        """
+        Computes a BAP sequence where each frame has cloudy pixels replaced.
+        
+        For each frame t, iterates backwards through previous frames to find
+        clear pixels. Cloudy/missing pixels are replaced with the most recent
+        clear observation. This provides realistic spectral values for the model
+        instead of zeros in cloudy regions.
+        
+        :param sentinel2: Input sequence (T, H, W, C).
+        :type sentinel2: np.ndarray
+        :param cloudmask: Cloud mask sequence (T, H, W, 1) where 1=cloudy.
+        :type cloudmask: np.ndarray
+        :return: BAP-filled sequence with same shape as input.
+        :rtype: np.ndarray
+        """
+        bap_sequence = sentinel2.copy()
+        
+        for t in range(1, sentinel2.shape[0]):  # Start from frame 1
+            # Current frame's cloud mask
+            current_mask = cloudmask[t]  # (H, W, 1)
+            
+            # Look backwards for clear pixels to fill cloudy regions
+            for prev_t in range(t - 1, -1, -1):
+                prev_mask = cloudmask[prev_t]
+                
+                # Update where current frame is cloudy but previous is clear
+                update_mask = (current_mask == 1) & (prev_mask == 0)
+                
+                bap_sequence[t] = np.where(update_mask, sentinel2[prev_t], bap_sequence[t])
+                
+                # Update the effective mask for this frame (pixels now filled)
+                current_mask = np.where(update_mask, 0, current_mask)
+                
+                # Early exit if all pixels are now clear
+                if np.sum(current_mask) == 0:
+                    break
+        
+        return bap_sequence
+
     def compute_bap(self, sentinel2: np.ndarray, cloudmask: np.ndarray) -> np.ndarray:
         """
-        Computes the Best Available Pixel (BAP) composite from the input sequence.
-        Iterates backwards from the last image. If a pixel is cloudy/missing in the
-        current composite but clear in the previous image, it is updated.
+        Computes the Best Available Pixel (BAP) composite for the last frame.
+
+        Returns the last frame of the BAP sequence, where cloudy pixels are
+        filled with the most recent clear observation from previous frames.
+
+        :param sentinel2: Input sequence (T, H, W, C).
+        :type sentinel2: np.ndarray
+        :param cloudmask: Cloud mask sequence (T, H, W, 1) where 1=cloudy.
+        :type cloudmask: np.ndarray
+        :return: BAP composite for the last frame (H, W, C).
+        :rtype: np.ndarray
         """
-        # Initialize BAP with the last image and its mask
-        bap = sentinel2[-1].copy()
-        bap_mask = cloudmask[-1].copy()
+        # Reuse compute_bap_sequence and return the last frame
+        bap_sequence = self.compute_bap_sequence(sentinel2, cloudmask)
+        return bap_sequence[-1]
 
-        # Iterate backwards from the second to last image
-        for i in range(sentinel2.shape[0] - 2, -1, -1):
-            # Identify pixels that are currently masked in BAP but clear in the current frame
-            # bap_mask == 1 (bad), cloudmask[i] == 0 (good)
-            update_mask = (bap_mask == 1) & (cloudmask[i] == 0)
-            
-            # Update BAP where we found better pixels
-            bap = np.where(update_mask, sentinel2[i], bap)
-            
-            # Update the mask: if we found a good pixel, it's no longer masked
-            bap_mask = np.where(update_mask, 0, bap_mask)
-            
-            # If no more masked pixels, we can stop early
-            if np.sum(bap_mask) == 0:
-                break
-                
-        return bap
+    def prepare_y(self, last_img: np.ndarray, dataset: xr.Dataset) -> np.ndarray:
+        """
+        Prepares target output with mask, deltas, and BAP reference.
 
-    def prepare_y(self, last_img: np.ndarray, dataset: xr.Dataset):
-        target_slice = slice(self.input_days+4, self.input_days+self.target_days, 5)
-        # dataset[self.S2_BANDS] # Unused access
+        :param last_img: BAP composite from the last input frame (H, W, C).
+        :type last_img: np.ndarray
+        :param dataset: xarray Dataset containing target satellite data.
+        :type dataset: xr.Dataset
+        :return: Target array (T, H, W, 9) with [mask(1), deltas(4), BAP(4)].
+        :rtype: np.ndarray
+        """
+        target_slice = slice(self.input_days + 4, self.input_days + self.target_days, 5)
         sentinel2, s2_mask = self.prepare_sentinel_for_slice(dataset, target_slice)
         
-        sentinel2_deltas = sentinel2.copy()
-        
-        # Tile last_img (BAP) to match time dimension of target
-        # last_img: (128, 128, 4)
-        # sentinel2: (T, 128, 128, 4)
-        bap_tiled = np.tile(
-            np.expand_dims(last_img, 0), 
-            (sentinel2.shape[0], 1, 1, 1)
-        ) # (T, 128, 128, 4)
-
+        # Tile BAP to match time dimension
+        bap_tiled = np.tile(np.expand_dims(last_img, 0), (sentinel2.shape[0], 1, 1, 1))
         sentinel2_deltas = sentinel2 - bap_tiled
 
-        # Output: [Mask (1), Deltas (4), BAP (4)] -> Total 9 channels
         return np.concatenate([s2_mask, sentinel2_deltas, bap_tiled], axis=-1)
         
     def __call__(self):
+        """
+        Generator that yields (x, y) tuples for each valid sample.
+
+        :yields: Tuple of (x_dict, y_array) for each sample.
+        :ytype: tuple[dict, np.ndarray]
+        """
         for file_path in self.files:
             try:
                 with xr.open_dataset(file_path) as ds:
-                    # Check if we have enough time steps
                     if len(ds.time) < self.input_days + self.target_days:
-                        # print(f"File {file_path} does not contains enough days")
                         continue
 
                     x = self.prepare_x(dataset=ds)
-                    
-                    # Compute Best Available Pixel (BAP) composite for the last image
                     last_img = self.compute_bap(x["sentinel2"], x["cloudmask"])
                     y = self.prepare_y(last_img=last_img, dataset=ds)
 
@@ -277,11 +346,16 @@ class DatasetGenerator:
                 continue
 
     def get_dataset(self) -> tf.data.Dataset:
+        """
+        Creates a tf.data.Dataset from the generator.
+
+        :return: TensorFlow Dataset yielding (x_dict, y_array) tuples.
+        :rtype: tf.data.Dataset
+        """
         actual_input_days = int(self.input_days / 5)
         actual_target_days = int(self.target_days / 5)
-        # Define output signature
-        # Weather: 7 vars × 3 aggregations = 21 features
         n_weather_features = len(self.EOBS_VARS) * 3
+        
         output_signature = (
             {
                 'time': tf.TensorSpec(shape=(actual_input_days, 3), dtype=tf.float32),
@@ -290,7 +364,6 @@ class DatasetGenerator:
                 'landcover': tf.TensorSpec(shape=(128, 128, 10), dtype=tf.float32),
                 'weather': tf.TensorSpec(shape=(actual_target_days, n_weather_features), dtype=tf.float32),
             },
-            # y: [Mask (1), Deltas (4), BAP (4)] = 9 channels
             tf.TensorSpec(shape=(actual_target_days, 128, 128, 9), dtype=tf.float32)
         )
         

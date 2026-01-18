@@ -1,0 +1,222 @@
+% =============================================================================
+% CHAPTER 4: RESULTS
+% =============================================================================
+\chapter{Results}
+\label{chap:results}
+
+This chapter presents the experimental results of the proposed growth curve regression model for vegetation forecasting. The evaluation includes quantitative error metrics, temporal and spatial error analysis, prediction visualizations, comparison with benchmark models, and preliminary interpretability analysis.
+
+\section{Error Metrics}
+
+The model was evaluated on the validation set using Mean Absolute Error (MAE) and Root Mean Square Error (RMSE) as primary metrics. Errors are computed on reflectance deltas after masking cloud-contaminated pixels.
+
+\subsection{Per-Band Performance}
+
+Table~\ref{tab:error_metrics} presents the error metrics for each spectral band.
+
+\begin{table}[H]
+    \centering
+    \caption{Per-band error metrics on validation set}
+    \label{tab:error_metrics}
+    \begin{tabular}{lcc}
+        \toprule
+        \textbf{Band} & \textbf{MAE} & \textbf{RMSE} \\
+        \midrule
+        B02 (Blue) & 0.029 & 0.057 \\
+        B03 (Green) & 0.032 & 0.058 \\
+        B04 (Red) & 0.041 & 0.066 \\
+        B8A (NIR) & 0.053 & 0.077 \\
+        \midrule
+        \textbf{Overall} & \textbf{0.039} & \textbf{0.064} \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+Key observations:
+\begin{itemize}
+    \item The NIR band (B8A) shows the highest prediction error, likely due to its higher sensitivity to vegetation changes and larger dynamic range.
+    \item The Blue band (B02) achieves the lowest error, consistent with its typically lower variability in vegetation-dominated scenes.
+    \item Overall errors are in a reasonable range considering that predictions span a 100-day forecast horizon with delta values typically in $[-0.2, 0.2]$.
+\end{itemize}
+
+\section{Temporal Error Analysis}
+
+Understanding how prediction error evolves across the forecast horizon is critical for assessing model reliability at different lead times.
+
+\subsection{Error Evolution Over Forecast Horizon}
+
+Figure~\ref{fig:temporal_error} shows the stacked Mean Absolute Error across the 20 forecast timesteps, disaggregated by spectral band.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.9\textwidth]{../images/results/temporal_error.png}
+    \caption{Prediction error evolution over the 100-day forecast horizon, stacked by spectral band. Each bar represents a 5-day forecast interval.}
+    \label{fig:temporal_error}
+\end{figure}
+
+The temporal error pattern reveals:
+\begin{itemize}
+    \item Error generally increases with forecast lead time, as expected for long-horizon prediction.
+    \item The growth curve formulation helps constrain error accumulation compared to autoregressive approaches, as errors at each timestep are generated independently from the same set of growth parameters.
+    \item NIR band consistently contributes the largest portion of total error across all timesteps.
+\end{itemize}
+
+\section{Spatial Error Analysis}
+
+Spatial patterns in prediction error can reveal systematic difficulties with certain land cover types or image regions.
+
+\subsection{Error Heatmap}
+
+Figure~\ref{fig:spatial_error} shows the average absolute error across the $128 \times 128$ pixel grid, averaged over multiple validation samples and all timesteps.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.6\textwidth]{../images/results/spatial_error_heatmap.png}
+    \caption{Spatial distribution of mean absolute error, averaged across samples and forecast timesteps.}
+    \label{fig:spatial_error}
+\end{figure}
+
+Observations:
+\begin{itemize}
+    \item Error patterns show spatial structure rather than uniform noise, suggesting systematic prediction challenges in certain regions.
+    \item Edges and boundaries between land cover types may contribute to higher local errors.
+    \item Cloud boundary effects and mixed pixel issues likely contribute to spatial error patterns.
+\end{itemize}
+
+\subsection{Land Cover Class Performance}
+
+% Placeholder: Analysis by land cover class would go here when computed
+Understanding prediction quality across different land cover types is important for agricultural applications. Future analysis will disaggregate error metrics by ESA WorldCover class to identify whether certain vegetation types are more challenging to forecast.
+
+\section{Prediction Visualization}
+
+Qualitative assessment of predictions provides insights beyond aggregate metrics.
+
+\subsection{Ground Truth vs. Prediction Comparison}
+
+Figures~\ref{fig:prediction_sample1} and \ref{fig:prediction_sample2} show comparisons between ground truth and predicted reflectance deltas for two validation samples across multiple forecast timesteps.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.9\textwidth]{../images/results/prediction_comparison_1.png}
+    \caption{Sample 1: Ground truth (top row) vs. predicted (bottom row) reflectance deltas across forecast timesteps. RGB visualization maps delta values to color channels.}
+    \label{fig:prediction_sample1}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.9\textwidth]{../images/results/prediction_comparison_2.png}
+    \caption{Sample 2: Ground truth (top row) vs. predicted (bottom row) reflectance deltas across forecast timesteps.}
+    \label{fig:prediction_sample2}
+\end{figure}
+
+The visualizations demonstrate:
+\begin{itemize}
+    \item The model captures the overall spatial structure of vegetation changes.
+    \item Temporal progression of predicted deltas follows physically plausible patterns.
+    \item Some smoothing of fine-scale features is apparent, likely due to the spatial smoothing layer and limited model capacity.
+\end{itemize}
+
+\section{Model Comparison}
+
+Table~\ref{tab:model_comparison} compares the proposed approach with published results on the GreenEarthNet benchmark.
+
+\begin{table}[H]
+    \centering
+    \caption{Model comparison on GreenEarthNet benchmark}
+    \label{tab:model_comparison}
+    \begin{tabular}{lccc}
+        \toprule
+        \textbf{Model} & \textbf{Parameters} & \textbf{Type} & \textbf{Veg. Score $\uparrow$} \\
+        \midrule
+        ConvLSTM & $\sim$2M & RNN-based & 0.21 \\
+        SGED-ConvLSTM & $\sim$3M & RNN-based & 0.24 \\
+        PredRNN & $\sim$24M & Video Pred. & 0.19 \\
+        SimVP & $\sim$22M & Video Pred. & 0.22 \\
+        Earthformer & $\sim$12M & Transformer & 0.28 \\
+        \textbf{Contextformer} & \textbf{6M} & \textbf{Transformer} & \textbf{0.31} \\
+        \midrule
+        \textbf{Ours (Growth Curve Reg.)} & \textbf{$<$1M} & \textbf{RNN-based} & \textbf{TBD} \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+\textit{Note: Vegetation Score evaluation on the full benchmark requires training on the complete GreenEarthNet dataset (23,816 samples). Current results are from preliminary experiments on a subset. Full benchmark evaluation is planned for future work.}
+
+Key differentiators of our approach:
+\begin{itemize}
+    \item Approximately 6$\times$ fewer parameters than Contextformer
+    \item Explicit modeling of vegetation phenology through growth curve parameters
+    \item Single forward pass for arbitrary forecast horizons (no autoregressive error accumulation)
+    \item Inherent interpretability through predicted growth parameters
+\end{itemize}
+
+\section{Interpretability Analysis}
+\label{sec:interpretability}
+
+A key motivation for the growth curve formulation is the interpretability of predictions through biophysically meaningful parameters. This section presents preliminary analysis and outlines planned investigations.
+
+\subsection{Growth Curve Parameter Analysis}
+
+\textit{[Placeholder for future work]}
+
+The growth curve parameters $(A, \lambda, B)$ have direct physical interpretations:
+\begin{itemize}
+    \item \textbf{Amplitude ($A$)}: Magnitude of vegetation change over the forecast period. Positive values indicate greening (growth), negative values indicate browning (senescence or stress).
+    \item \textbf{Rate ($\lambda$)}: Speed of vegetation response. Higher values indicate rapid changes (e.g., spring green-up), lower values indicate gradual transitions.
+    \item \textbf{Offset ($B$)}: Systematic baseline shift, capturing persistent trends independent of the growth dynamic.
+\end{itemize}
+
+Planned analyses include:
+\begin{enumerate}
+    \item \textbf{Parameter distributions}: Characterize the statistical distributions of $A$, $\lambda$, $B$ across the dataset, identifying typical ranges and outliers.
+    \item \textbf{Land cover correlations}: Investigate whether growth parameters differ systematically across land cover types (e.g., forests vs. croplands vs. grasslands).
+    \item \textbf{Seasonal patterns}: Analyze how parameter distributions vary with season, potentially revealing phenological patterns encoded by the model.
+    \item \textbf{Extreme value analysis}: Identify samples with unusual parameter values and investigate whether they correspond to extreme weather events or anomalous vegetation dynamics.
+\end{enumerate}
+
+\subsection{Error Source Identification}
+
+\textit{[Placeholder for future work]}
+
+Understanding the sources of prediction error informs model improvement. Planned investigations include:
+
+\begin{enumerate}
+    \item \textbf{Systematic vs. random error decomposition}: Determine whether errors are predominantly systematic (consistent biases) or random (unpredictable noise), informing whether architectural changes or larger datasets would be more beneficial.
+    
+    \item \textbf{Weather condition relationships}: Analyze whether prediction errors correlate with specific meteorological conditions (drought, extreme precipitation, temperature anomalies), potentially revealing limitations in weather integration.
+    
+    \item \textbf{Cloud coverage impact}: Quantify how input cloud coverage affects prediction quality, providing guidance on minimum data quality requirements for reliable forecasting.
+    
+    \item \textbf{Temporal decomposition}: Separate errors into contributions from initial condition uncertainty (early timesteps) vs. dynamic prediction errors (later timesteps).
+\end{enumerate}
+
+\subsection{Phenological Interpretation}
+
+\textit{[Placeholder for future work]}
+
+The growth curve formulation should encode vegetation phenology in its parameters. Planned analyses include:
+
+\begin{enumerate}
+    \item \textbf{Growth curve shape taxonomy}: Cluster predicted growth curves by shape characteristics to identify common temporal patterns (e.g., monotonic growth, plateau, decline).
+    
+    \item \textbf{Comparison with known phenology}: Validate that predicted growth curve shapes are consistent with established phenological calendars for different vegetation types and regions.
+    
+    \item \textbf{Anomaly detection}: Use deviation from expected growth curve shapes to flag potential vegetation stress or unusual dynamics.
+    
+    \item \textbf{Weather modulation analysis}: Investigate how the weather adjustment factors $\text{adj}(t)$ modify growth curves under different meteorological scenarios.
+\end{enumerate}
+
+\section{Summary}
+
+The experimental results demonstrate that the proposed growth curve regression approach:
+
+\begin{enumerate}
+    \item Achieves reasonable prediction accuracy on reflectance delta forecasting (overall MAE = 0.039, RMSE = 0.064)
+    \item Exhibits expected temporal error growth over the forecast horizon, but with constrained accumulation due to the trajectory-based formulation
+    \item Produces spatially coherent predictions that capture major vegetation dynamics
+    \item Maintains dramatically lower parameter count ($<$1M) compared to state-of-the-art transformer models (6--24M)
+    \item Provides inherent interpretability through growth curve parameters with biophysical meaning
+\end{enumerate}
+
+Full benchmark evaluation on the complete GreenEarthNet dataset and detailed interpretability analyses remain as future work to comprehensively assess the approach's merits relative to existing methods.

@@ -1,0 +1,71 @@
+% =============================================================================
+% CHAPTER 1: INTRODUCTION
+% =============================================================================
+\chapter{Introduction}
+\label{chap:introduction}
+
+\section{Context and Motivation}
+
+Climate change poses unprecedented challenges to agricultural systems worldwide, with particularly severe impacts in Mediterranean regions characterized by significant inter-annual climatic variability. The alternation between prolonged drought periods and intense precipitation events creates complex stress dynamics for vegetation, making traditional agronomic management increasingly difficult and unreliable.
+
+Modern agriculture increasingly relies on Earth observation data to monitor crop health and predict vegetation dynamics. Satellite-based remote sensing, particularly from the European Space Agency's Sentinel-2 mission, provides high-resolution multispectral imagery at regular intervals, enabling systematic monitoring of vegetation across large spatial extents. The Normalized Difference Vegetation Index (NDVI) and its variants have become standard proxies for vegetation health, photosynthetic activity, and biomass estimation.
+
+However, the transition from reactive monitoring to proactive prediction remains a significant challenge. Traditional approaches to vegetation monitoring only allow detection of crop stress when damage is already visually evident and often irreversible. The ability to forecast vegetation dynamics days to months in advance would enable preventive interventions during optimal time windows, fundamentally transforming agricultural decision-making from reactive to anticipatory.
+
+\section{Problem Statement}
+
+The prediction of vegetation dynamics from satellite image time series presents several technical challenges:
+
+\begin{enumerate}
+    \item \textbf{Temporal Irregularity}: Satellite observations are affected by cloud cover and orbital patterns, creating irregular time series that conventional sequence models struggle to handle effectively.
+    
+    \item \textbf{Multi-Modal Data Integration}: Vegetation growth depends on multiple factors including historical reflectance patterns, meteorological conditions, and land cover characteristics. Effective forecasting requires principled integration of heterogeneous data sources operating at different spatial and temporal resolutions.
+    
+    \item \textbf{Long-Horizon Prediction}: While short-term predictions (days ahead) are relatively tractable, forecasting vegetation states over horizons of weeks to months requires capturing both fast dynamics (weather responses) and slow dynamics (phenological progression).
+    
+    \item \textbf{Interpretability}: Agricultural applications require not only accurate predictions but also explanations that can be translated into actionable recommendations. Black-box models, despite potentially high accuracy, provide limited utility for agronomic decision support.
+\end{enumerate}
+
+\section{Research Objectives}
+
+This research addresses the aforementioned challenges through the development of a deep learning framework specifically designed for long-horizon vegetation forecasting. The primary objectives are:
+
+\begin{enumerate}
+    \item \textbf{Long-Horizon Forecasting}: Develop a model capable of predicting vegetation dynamics over a 100-day forecast horizon using 50 days of historical observations, substantially exceeding the typical 5-10 day horizons of iterative step-by-step prediction methods.
+    
+    \item \textbf{Multi-Modal Integration}: Design an architecture that effectively fuses multi-spectral satellite imagery (Sentinel-2), meteorological variables (E-OBS climate data), and static land cover information (ESA WorldCover) through learned attention mechanisms.
+    
+    \item \textbf{Interpretable Predictions}: Implement a parametric growth curve decoder that generates predictions through biophysically meaningful parameters (growth amplitude, rate, and offset) rather than opaque neural network outputs, enabling interpretation of forecasts in terms of vegetation phenology.
+    
+    \item \textbf{Computational Efficiency}: Achieve competitive performance with significantly fewer parameters than state-of-the-art transformer-based approaches, enabling deployment in resource-constrained operational settings.
+\end{enumerate}
+
+\section{Contributions}
+
+The main contributions of this work are:
+
+\begin{enumerate}
+    \item \textbf{Growth Curve Trajectory Learning}: A novel approach to vegetation forecasting that learns complete saturation growth curve trajectories rather than predicting iteratively step-by-step. While inspired by the growth curve decoder concept introduced by \citet{pellicer2024explainable}, our method fundamentally differs by fitting entire 100-day trajectories in a single forward pass, enabling efficient long-horizon prediction without error accumulation.
+    
+    \item \textbf{Weather-Adjusted Growth Dynamics}: An architecture component that modulates growth curve parameters based on meteorological conditions, allowing the model to capture weather-dependent variations in vegetation response while maintaining the interpretable growth curve structure.
+    
+    \item \textbf{Lightweight Multi-Modal Architecture}: A ConvLSTM-based encoder with cloud-aware gating that effectively processes irregular satellite observations while integrating weather and land cover information, achieving competitive performance with fewer than 1 million parameters.
+    
+    \item \textbf{Empirical Validation}: Comprehensive evaluation on the GreenEarthNet benchmark dataset, including comparison with state-of-the-art models and analysis of prediction quality across different land cover types and forecast horizons.
+\end{enumerate}
+
+\section{Thesis Structure}
+
+The remainder of this thesis is organized as follows:
+
+\begin{itemize}
+    \item \textbf{Chapter~\ref{chap:literature_review}} reviews related work on vision transformers for remote sensing, satellite image time series analysis, and vegetation forecasting, identifying research gaps that motivate the proposed approach.
+    
+    \item \textbf{Chapter~\ref{chap:materials_methods}} describes the GreenEarthNet dataset, data preprocessing pipeline, model architecture, loss function design, and training configuration.
+    
+    \item \textbf{Chapter~\ref{chap:results}} presents experimental results including quantitative error metrics, temporal and spatial error analysis, prediction visualizations, model comparison, and interpretability analysis of growth curve parameters.
+    
+    \item \textbf{Chapter 5} discusses implications of the results, limitations of the current approach, and directions for future research.
+    
+    \item \textbf{Chapter 6} summarizes conclusions and key findings.
+\end{itemize}

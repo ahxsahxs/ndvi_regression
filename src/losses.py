@@ -136,35 +136,39 @@ class kNDVILoss(keras.losses.Loss):
 @keras.utils.register_keras_serializable(package="ConvLSTMSpline")
 class ImprovedkNDVILoss(keras.losses.Loss):
     """
-    Enhanced kNDVI loss with improved convergence properties:
-    - Gradient clipping: Caps extreme kNDVI differences to prevent saturation
-    - Learned weights: Automatic loss component balancing via uncertainty weighting
-    - Cumulative loss: Supervises the trajectory to fix magnitude/sign bias
+    Combined loss for delta prediction with balanced component scaling.
     
-    Note: Temporal smoothness was removed as it encouraged constant predictions.
+    Components (with default weights prioritizing regression):
+    - Huber loss on deltas for regression (weight=10.0, primary objective)
+    - Variance penalty to prevent mode collapse (weight=1.0, regularizer)
+    - kNDVI loss for spectral consistency (weight=0.1 when enabled, auxiliary)
+    
+    All components are normalized to similar scales before weighting to ensure
+    no single component dominates the gradient signal.
+    
+    The variance penalty computes the absolute difference between the spatial
+    variance of true deltas and predicted deltas, encouraging the model to
+    preserve spatial variability rather than collapsing to constant predictions.
     """
     def __init__(
         self, 
-        kndvi_clip=0.5,      # Max kNDVI difference (gradient clipping)
-        sigma=0.5,           # RBF kernel sigma
-        learn_weights=True,  # Enable learned loss weights
+        regression_weight=10.0,  # Primary objective weight
+        variance_weight=1.0,     # Regularizer weight
+        kndvi_weight=0.0,        # Auxiliary loss weight (0 = disabled, set via callback)
+        kndvi_clip=0.5,          # Max kNDVI difference (gradient clipping)
+        sigma=0.5,               # RBF kernel sigma
         name='improved_kndvi_loss', 
         **kwargs
     ):
         super().__init__(name=name, **kwargs)
+        self.regression_weight = regression_weight
+        self.variance_weight = variance_weight
+        self.kndvi_weight = tf.Variable(kndvi_weight, trainable=False, dtype=tf.float32, name='kndvi_weight')
         self.kndvi_clip = kndvi_clip
         self.sigma = sigma
-        self.learn_weights = learn_weights
-        
-        # Learned loss weights (log-variance parameterization)
-        if learn_weights:
-            self.log_var_reg = tf.Variable(0.0, trainable=True, name='log_var_reg')
-            self.log_var_kndvi = tf.Variable(0.0, trainable=True, name='log_var_kndvi')
         
         # Reduced Huber delta to 0.1 for stronger gradients on small delta errors
         self.fn_huber = keras.losses.Huber(delta=0.1, reduction="none")
-
-
 
     def kernel_function(self, n, r):
         """RBF Kernel k(n, r) = exp(-(n-r)^2 / (2*sigma^2))"""
@@ -190,11 +194,36 @@ class ImprovedkNDVILoss(keras.losses.Loss):
         weight_sum = tf.reduce_sum(sample_weight) + 1e-6
         
         # --- 1. Regression Loss (Huber on Deltas) ---
+        # Expected range: ~0.001 to 0.05 for well-behaved deltas
         reg_loss = self.fn_huber(true_deltas, pred_deltas)
         masked_reg_loss = reg_loss * tf.squeeze(sample_weight, axis=-1)
         total_reg_loss = tf.reduce_sum(masked_reg_loss) / weight_sum
         
-        # --- 2. kNDVI Loss on Deltas ---
+        # --- 2. Variance Penalty (prevent mode collapse) ---
+        # Compute spatial variance of true and predicted deltas per sample
+        # Expected range: ~0.0001 to 0.01 (variance of small deltas)
+        weights_expanded = sample_weight  # (B, T, H, W, 1)
+        
+        # Weighted mean per sample per band
+        true_weighted = true_deltas * weights_expanded
+        pred_weighted = pred_deltas * weights_expanded
+        
+        # Mean across spatial dims (H, W) - shape becomes (B, T, 1, 1, 4)
+        spatial_weight_sum = tf.reduce_sum(weights_expanded, axis=[2, 3], keepdims=True) + 1e-6
+        true_mean = tf.reduce_sum(true_weighted, axis=[2, 3], keepdims=True) / spatial_weight_sum
+        pred_mean = tf.reduce_sum(pred_weighted, axis=[2, 3], keepdims=True) / spatial_weight_sum
+        
+        # Variance = E[(x - mean)^2]
+        spatial_weight_sum_squeezed = tf.reduce_sum(weights_expanded, axis=[2, 3]) + 1e-6
+        true_var = tf.reduce_sum(weights_expanded * tf.square(true_deltas - true_mean), axis=[2, 3]) / spatial_weight_sum_squeezed
+        pred_var = tf.reduce_sum(weights_expanded * tf.square(pred_deltas - pred_mean), axis=[2, 3]) / spatial_weight_sum_squeezed
+        
+        # Variance penalty: abs difference between true and pred variance
+        # Scale by 100 to bring into similar range as regression loss (~0.01-0.1)
+        variance_penalty = tf.reduce_mean(tf.abs(true_var - pred_var)) * 100.0
+        
+        # --- 3. kNDVI Loss (optional, controlled by kndvi_weight) ---
+        # Expected range: ~0.01 to 0.3 (kNDVI differences)
         true_full = bap + true_deltas
         pred_full = bap + pred_deltas
         
@@ -209,38 +238,53 @@ class ImprovedkNDVILoss(keras.losses.Loss):
         kndvi_diff = tf.minimum(kndvi_diff, self.kndvi_clip)
         
         masked_kndvi_loss = kndvi_diff * tf.squeeze(sample_weight, axis=-1)
-        total_kndvi_loss = tf.reduce_sum(masked_kndvi_loss) / weight_sum
+        # Scale by 0.1 to bring into similar range as regression loss
+        total_kndvi_loss = tf.reduce_sum(masked_kndvi_loss) / weight_sum * 0.1
         
-        # --- 3. Cumulative Loss (Trajectory Supervision) ---
-        # "Area under the curve" / Integral supervision
-        # Determines the total change over time, fixing magnitude/sign bias
-        true_cumsum = tf.cumsum(true_deltas, axis=1) # (B, Time, H, W, 4)
-        pred_cumsum = tf.cumsum(pred_deltas, axis=1)
+        # --- Combine Losses with Weights ---
+        # All components now normalized to ~0.01-0.1 range before weighting
+        total_loss = (
+            self.regression_weight * total_reg_loss +
+            self.variance_weight * variance_penalty +
+            self.kndvi_weight * total_kndvi_loss
+        )
         
-        # We use Huber loss on the cumulative sums as well
-        cum_loss = self.fn_huber(true_cumsum, pred_cumsum)
-        masked_cum_loss = cum_loss * tf.squeeze(sample_weight, axis=-1)
-        total_cum_loss = tf.reduce_sum(masked_cum_loss) / weight_sum
-
-        # --- 4. Combine Losses ---
-        # Temporal smoothness was REMOVED as it encouraged constant predictions
-        if self.learn_weights:
-            # Uncertainty weighting
-            loss = (
-                tf.exp(-self.log_var_reg) * (total_reg_loss + total_cum_loss) + self.log_var_reg +
-                tf.exp(-self.log_var_kndvi) * total_kndvi_loss + self.log_var_kndvi
-            )
-        else:
-            loss = (total_reg_loss + total_cum_loss) + total_kndvi_loss
-        
-        return loss
+        return total_loss
 
     def get_config(self):
         config = super().get_config()
         config.update({
+            'regression_weight': self.regression_weight,
+            'variance_weight': self.variance_weight,
+            'kndvi_weight': float(self.kndvi_weight.numpy()),
             'kndvi_clip': self.kndvi_clip,
             'sigma': self.sigma,
-            'learn_weights': self.learn_weights,
         })
         return config
 
+
+class EnablekNDVICallback(keras.callbacks.Callback):
+    """
+    Callback to enable kNDVI loss component after a warmup period.
+    
+    During the warmup epochs, only regression loss and variance penalty are active.
+    After warmup, the kNDVI loss is enabled with the specified weight.
+    
+    :param enable_epoch: Epoch at which to enable kNDVI loss (default 20).
+    :type enable_epoch: int
+    :param kndvi_weight: Weight for kNDVI loss when enabled (default 1.0).
+    :type kndvi_weight: float
+    """
+    def __init__(self, enable_epoch=20, kndvi_weight=1.0):
+        super().__init__()
+        self.enable_epoch = enable_epoch
+        self.kndvi_weight = kndvi_weight
+        self.enabled = False
+    
+    def on_epoch_begin(self, epoch, logs=None):
+        if not self.enabled and epoch >= self.enable_epoch:
+            loss_fn = self.model.loss
+            if hasattr(loss_fn, 'kndvi_weight'):
+                loss_fn.kndvi_weight.assign(self.kndvi_weight)
+                self.enabled = True
+                print(f'\nEnablekNDVICallback: Enabled kNDVI loss with weight={self.kndvi_weight} at epoch {epoch}')

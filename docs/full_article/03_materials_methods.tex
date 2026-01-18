@@ -1,0 +1,358 @@
+% =============================================================================
+% CHAPTER 3: MATERIALS AND METHODS
+% =============================================================================
+\chapter{Materials and Methods}
+\label{chap:materials_methods}
+
+This chapter describes the dataset, preprocessing pipeline, model architecture, loss function design, and training configuration used in this work. The methodology builds upon the GreenEarthNet benchmark \citep{benson2024multimodal} while introducing a novel growth curve trajectory learning approach inspired by \citet{pellicer2024explainable}.
+
+\section{Dataset: GreenEarthNet}
+
+The GreenEarthNet dataset provides a standardized benchmark for multi-modal vegetation forecasting, containing aligned satellite imagery, meteorological data, and land cover classification for sites across Europe.
+
+\subsection{Data Sources}
+
+The dataset integrates three primary data sources:
+
+\subsubsection{Sentinel-2 Multispectral Imagery}
+
+The Sentinel-2 mission provides multispectral imagery at 10-20m spatial resolution with a 5-day revisit time at the equator. Four spectral bands are used in this work:
+
+\begin{table}[H]
+    \centering
+    \caption{Sentinel-2 spectral bands used in this study}
+    \label{tab:sentinel_bands}
+    \begin{tabular}{llcc}
+        \toprule
+        \textbf{Band} & \textbf{Description} & \textbf{Wavelength (nm)} & \textbf{Resolution (m)} \\
+        \midrule
+        B02 & Blue & 490 & 10 \\
+        B03 & Green & 560 & 10 \\
+        B04 & Red & 665 & 10 \\
+        B8A & Near-Infrared (NIR) & 865 & 20 \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+Each sample consists of a minicube of size $128 \times 128$ pixels covering approximately 1.28 km$^2$ at the original 10m resolution. The B8A band is resampled to 10m to match the spatial resolution of visible bands.
+
+\subsubsection{E-OBS Climate Variables}
+
+Meteorological context is provided by the E-OBS dataset, a gridded observational dataset for European climate. Seven variables are extracted:
+
+\begin{table}[H]
+    \centering
+    \caption{E-OBS climate variables}
+    \label{tab:eobs_variables}
+    \begin{tabular}{llc}
+        \toprule
+        \textbf{Variable} & \textbf{Description} & \textbf{Range} \\
+        \midrule
+        \texttt{eobs\_tg} & Mean temperature & -20 to 45°C \\
+        \texttt{eobs\_hu} & Relative humidity & 0--100\% \\
+        \texttt{eobs\_pp} & Sea level pressure & 950--1050 hPa \\
+        \texttt{eobs\_qq} & Global radiation & 0--400 W/m² \\
+        \texttt{eobs\_rr} & Precipitation & 0--50 mm \\
+        \texttt{eobs\_tn} & Minimum temperature & -30 to 35°C \\
+        \texttt{eobs\_tx} & Maximum temperature & -10 to 50°C \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+\subsubsection{ESA WorldCover Land Classification}
+
+Static land cover information is provided by the ESA WorldCover product at 10m resolution, with 10 classes relevant to the dataset:
+
+\begin{itemize}
+    \item Tree cover, Shrubland, Grassland, Cropland
+    \item Built-up, Bare/sparse vegetation, Snow/ice, Water
+    \item Wetland, Mangroves
+\end{itemize}
+
+Land cover is represented as a one-hot encoded map of shape $(128, 128, 10)$.
+
+\subsection{Temporal Structure}
+
+The forecasting task uses 50 days of historical observations to predict 100 days into the future. Temporal sampling follows a 5-day interval aligned with Sentinel-2 revisit patterns:
+
+\begin{itemize}
+    \item \textbf{Input period}: Days 4--49 (10 frames at 5-day intervals)
+    \item \textbf{Target period}: Days 54--149 (20 frames at 5-day intervals)
+\end{itemize}
+
+\subsection{Dataset Splits}
+
+GreenEarthNet provides standardized splits for training and evaluation:
+
+\begin{table}[H]
+    \centering
+    \caption{GreenEarthNet dataset splits}
+    \label{tab:dataset_splits}
+    \begin{tabular}{lll}
+        \toprule
+        \textbf{Split} & \textbf{Samples} & \textbf{Description} \\
+        \midrule
+        train & 23,816 & Training set (85 tiles) \\
+        val\_chopped & -- & IID validation set \\
+        ood-t & -- & Out-of-distribution temporal \\
+        ood-s & -- & Out-of-distribution spatial \\
+        ood-st & -- & Out-of-distribution spatio-temporal \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+\section{Data Preprocessing Pipeline}
+
+Raw observations require preprocessing to handle missing data, cloud contamination, and feature normalization.
+
+\subsection{Cloud Masking and NaN Handling}
+
+Sentinel-2 observations include a cloud mask derived from the Sen2Cor processor. Cloud-contaminated pixels are marked as invalid along with pixels containing NaN values (sensor errors, missing data). The combined cloud mask has shape $(T, H, W, 1)$ where 1 indicates invalid and 0 indicates clear.
+
+\subsection{Best Available Pixel (BAP) Compositing}
+
+To provide a consistent reference for delta prediction, a Best Available Pixel (BAP) composite is computed. For each pixel location, the algorithm iterates backwards through the temporal sequence to find the most recent clear (non-cloudy) observation:
+
+\begin{algorithm}[H]
+    \caption{Best Available Pixel Compositing}
+    \begin{algorithmic}[1]
+        \REQUIRE Sentinel-2 sequence $S$ of shape $(T, H, W, C)$, cloud mask $M$ of shape $(T, H, W, 1)$
+        \ENSURE BAP composite $B$ of shape $(H, W, C)$
+        \STATE Initialize $B \leftarrow S[T-1]$ \COMMENT{Start with last frame}
+        \FOR{$t = T-2$ \TO $0$}
+            \STATE $\text{cloudy} \leftarrow M[t+1] > 0$ \COMMENT{Pixels needing fill}
+            \STATE $B[\text{cloudy}] \leftarrow S[t][\text{cloudy}]$ \COMMENT{Fill from earlier frame}
+        \ENDFOR
+        \RETURN $B$
+    \end{algorithmic}
+\end{algorithm}
+
+The model predicts reflectance deltas relative to the BAP composite rather than absolute reflectance values, reducing the dynamic range of predictions and focusing the model on temporal changes.
+
+\subsection{Weather Feature Engineering}
+
+Raw meteorological variables require transformation to capture both absolute values and anomalies. A climatology-based detrending approach is applied:
+
+\begin{enumerate}
+    \item Compute 21-day rolling mean as climatology baseline
+    \item Calculate anomalies as deviation from climatology: $\text{anomaly} = \text{value} - \text{climatology}$
+    \item For each 5-day forecast step, extract three aggregations:
+    \begin{itemize}
+        \item \texttt{min\_detrend}: Minimum anomaly (normalized to $[-1, 1]$)
+        \item \texttt{max\_detrend}: Maximum anomaly (normalized to $[-1, 1]$)
+        \item \texttt{mean\_clima}: Mean climatology (normalized to $[0, 1]$)
+    \end{itemize}
+\end{enumerate}
+
+This yields a weather feature tensor of shape $(20, 21)$ representing 7 variables $\times$ 3 aggregations for each of the 20 target timesteps.
+
+\subsection{Temporal Metadata}
+
+Temporal context is encoded through three features:
+\begin{itemize}
+    \item Year normalization: $(\text{year} - 2017) / 4$ for the 2017--2021 range
+    \item Cyclic day-of-year encoding: $\sin(2\pi \cdot \text{doy} / \text{days\_in\_year})$ and $\cos(2\pi \cdot \text{doy} / \text{days\_in\_year})$
+\end{itemize}
+
+\section{Model Architecture}
+
+The proposed architecture consists of a latent space encoder, regression parameter head, weather-time adjustment MLP, growth curve layer, and spatial smoothing layer. The design is inspired by the growth curve decoder concept of \citet{pellicer2024explainable}, with the key innovation of learning full trajectories rather than next-step predictions.
+
+\subsection{Architecture Overview}
+
+Figure~\ref{fig:architecture} provides an overview of the model architecture. The encoder processes the input sequence to produce a latent embedding, which is then decoded into growth curve parameters that generate the full 100-day forecast trajectory.
+
+\begin{figure}[H]
+    \centering
+    % Placeholder for architecture diagram
+    \fbox{\parbox{0.8\textwidth}{\centering\vspace{2cm}Architecture Diagram\\(See presentation for visual)\vspace{2cm}}}
+    \caption{Model architecture overview showing the encoder-decoder structure with growth curve parameterization.}
+    \label{fig:architecture}
+\end{figure}
+
+\subsection{Latent Space Encoder}
+
+The encoder processes the multi-modal inputs to produce a spatially-distributed latent embedding.
+
+\subsubsection{Input Concatenation}
+
+Sentinel-2 bands $(10, 128, 128, 4)$ and land cover one-hot encoding $(128, 128, 10)$ are concatenated along the channel dimension after broadcasting land cover across time, yielding a 14-channel input tensor.
+
+\subsubsection{Cloud-Aware Gating Layer}
+
+To handle cloud-contaminated observations, a gating mechanism multiplies input features by $(1 - \text{cloudmask})$, effectively zeroing out contributions from cloudy pixels:
+\begin{equation}
+    \text{gated\_features} = \text{features} \odot (1 - \text{cloudmask})
+\end{equation}
+
+This allows the subsequent ConvLSTM layers to learn from valid pixels while ignoring contaminated regions.
+
+\subsubsection{ConvLSTM Stack}
+
+Three ConvLSTM2D layers with increasing channel dimensions (32, 48, 64) process the gated sequence, capturing spatiotemporal patterns in the input data. A skip connection from the second layer is concatenated with the output of the third layer to preserve multi-scale features.
+
+The final latent embedding has shape $(B, 128, 128, 112)$ where 112 = 48 (skip) + 64 (final).
+
+\subsection{Regression Parameter Head}
+
+The regression parameter head generates triplet parameters $(A, \lambda, B)$ for each pixel and spectral band from the latent embedding.
+
+\begin{table}[H]
+    \centering
+    \caption{Growth curve parameters and their interpretations}
+    \label{tab:growth_params}
+    \begin{tabular}{llll}
+        \toprule
+        \textbf{Parameter} & \textbf{Activation} & \textbf{Range} & \textbf{Interpretation} \\
+        \midrule
+        $A$ (amplitude) & $\tanh \times \text{scale}$ & Bounded $\pm$ & Growth magnitude \\
+        $\lambda$ (rate) & $\text{sigmoid} \rightarrow [\lambda_{\min}, \lambda_{\max}]$ & $> 0$ & Growth speed \\
+        $B$ (offset) & $\tanh \times 0.1$ & $[-0.1, 0.1]$ & Baseline shift \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+Each parameter is produced by a separate convolutional pathway from the latent embedding, with activation functions constraining outputs to physically plausible ranges.
+
+\subsection{Weather-Time Adjustment MLP}
+
+The weather-time adjustment MLP produces time-varying multiplicative factors that modulate the growth curve based on meteorological conditions:
+
+\begin{equation}
+    \text{adj}(t) \in [0.5, 1.5]
+\end{equation}
+
+The MLP takes temporal metadata $(3,)$ and weather sequence $(20, 21)$ as input, processing them through dense layers to produce adjustment factors for each timestep. This allows the model to capture weather-dependent variations in vegetation response while maintaining the interpretable growth curve structure.
+
+\subsection{Growth Curve Layer}
+
+The growth curve layer combines the regression parameters with time adjustment factors to generate the full delta trajectory:
+
+\begin{equation}
+    \delta(t) = A \cdot (1 - e^{-\lambda \cdot T \cdot t \cdot \text{adj}(t)}) + B
+    \label{eq:growth_curve}
+\end{equation}
+
+where:
+\begin{itemize}
+    \item $t \in [0, 1]$ is normalized time within the forecast horizon
+    \item $T = 20$ is the number of output timesteps
+    \item $\text{adj}(t)$ is the weather-time adjustment factor
+\end{itemize}
+
+This formulation represents a saturation growth curve with weather-modulated rate. Unlike the approach of \citet{pellicer2024explainable} which uses the growth curve to predict next-step changes, our method directly generates predictions for all 20 timesteps in a single forward pass, enabling efficient long-horizon forecasting without error accumulation.
+
+\subsection{Spatial Smoothing Layer}
+
+A final spatial smoothing layer applies learned depthwise separable convolution to prevent sharp discontinuities in the predicted delta maps. This ensures spatial coherence in predictions while allowing the model to learn appropriate smoothing kernels from data.
+
+\section{Loss Function: ImprovedkNDVILoss}
+
+The loss function combines regression accuracy with variance preservation and spectral consistency through three components.
+
+\subsection{Masked Huber Regression Loss}
+
+The primary loss component is the Huber loss applied to reflectance deltas, masked to exclude cloud-contaminated pixels:
+
+\begin{equation}
+    \mathcal{L}_{\text{reg}} = \text{Huber}_{\delta=0.1}(\delta_{\text{true}}, \delta_{\text{pred}}) \odot (1 - m_{\text{cloud}})
+\end{equation}
+
+The Huber loss with $\delta=0.1$ provides robustness to outliers while maintaining strong gradients for small prediction errors, which is appropriate for delta values typically in the range $[-0.2, 0.2]$.
+
+\subsection{Variance Penalty}
+
+To prevent mode collapse where the model predicts constant values across spatial locations, a variance penalty encourages matching the spatial variance of predictions to ground truth:
+
+\begin{equation}
+    \mathcal{L}_{\text{var}} = |\text{Var}_{\text{spatial}}(\delta_{\text{true}}) - \text{Var}_{\text{spatial}}(\delta_{\text{pred}})| \times 100
+\end{equation}
+
+The scaling factor ensures this component contributes meaningfully relative to the regression loss.
+
+\subsection{kNDVI Loss}
+
+The kernel NDVI (kNDVI) loss provides spectral consistency by ensuring predictions produce accurate vegetation indices:
+
+\begin{equation}
+    k(n, r) = \exp\left(-\frac{(n - r)^2}{2\sigma^2}\right)
+\end{equation}
+\begin{equation}
+    \text{kNDVI} = \frac{1 - k(n, r)}{1 + k(n, r)}
+\end{equation}
+\begin{equation}
+    \mathcal{L}_{\text{kndvi}} = \min(|\text{kNDVI}_{\text{true}} - \text{kNDVI}_{\text{pred}}|, 0.5) \times 0.1
+\end{equation}
+
+where $n$ and $r$ are NIR and Red reflectance values respectively, and $\sigma=0.5$ is the RBF kernel parameter. The kNDVI formulation \citep{camps2021unified} provides a more robust vegetation index than traditional NDVI.
+
+\subsection{Combined Loss}
+
+The total loss is a weighted combination of components:
+
+\begin{equation}
+    \mathcal{L}_{\text{total}} = w_{\text{reg}} \cdot \mathcal{L}_{\text{reg}} + w_{\text{var}} \cdot \mathcal{L}_{\text{var}} + w_{\text{kndvi}} \cdot \mathcal{L}_{\text{kndvi}}
+\end{equation}
+
+Default weights are $w_{\text{reg}} = 10.0$, $w_{\text{var}} = 1.0$, and $w_{\text{kndvi}} = 0.0 \rightarrow 1.0$ (enabled via callback after warmup).
+
+\subsection{EnablekNDVICallback}
+
+The kNDVI component is initially disabled to allow the model to first learn basic regression dynamics. After a warmup period (default 20 epochs), a callback enables the kNDVI loss component to refine spectral consistency:
+
+\begin{equation}
+    w_{\text{kndvi}} = \begin{cases}
+        0.0 & \text{if epoch} < 20 \\
+        1.0 & \text{if epoch} \geq 20
+    \end{cases}
+\end{equation}
+
+\section{Training Configuration}
+
+\subsection{Optimization}
+
+\begin{table}[H]
+    \centering
+    \caption{Training hyperparameters}
+    \label{tab:training_config}
+    \begin{tabular}{ll}
+        \toprule
+        \textbf{Parameter} & \textbf{Value} \\
+        \midrule
+        Optimizer & Adam \\
+        Initial learning rate & $1 \times 10^{-3}$ \\
+        Learning rate schedule & ReduceLROnPlateau \\
+        Batch size & 1--2 \\
+        Epochs & 500 \\
+        Early stopping patience & 50 epochs \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+\subsection{Model Size}
+
+The complete model contains fewer than 1 million parameters, significantly smaller than transformer-based alternatives:
+
+\begin{table}[H]
+    \centering
+    \caption{Model parameter count by component}
+    \label{tab:param_count}
+    \begin{tabular}{lr}
+        \toprule
+        \textbf{Component} & \textbf{Parameters} \\
+        \midrule
+        Cloud-Aware Gating & 0 \\
+        ConvLSTM Stack & $\sim$600K \\
+        Regression Parameter Head & $\sim$200K \\
+        Weather-Time Adjustment MLP & $\sim$50K \\
+        Growth Curve Layer & 0 \\
+        Spatial Smoothing & $\sim$1K \\
+        \midrule
+        \textbf{Total} & $\sim$850K \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+\subsection{Hardware}
+
+Training was conducted on NVIDIA GPU with mixed precision training enabled for memory efficiency.

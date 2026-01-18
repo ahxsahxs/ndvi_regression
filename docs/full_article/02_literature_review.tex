@@ -1,0 +1,108 @@
+% =============================================================================
+% CHAPTER 2: LITERATURE REVIEW
+% =============================================================================
+\chapter{Literature Review}
+\label{chap:literature_review}
+
+This chapter reviews the state of the art in deep learning for satellite image analysis, with particular focus on vision transformers, satellite image time series (SITS) processing, and vegetation forecasting. The review synthesizes insights from computer vision, remote sensing, and agricultural monitoring to establish the theoretical and methodological foundations for the proposed approach.
+
+\section{Vision Transformers in Remote Sensing}
+
+The introduction of the Vision Transformer (ViT) by \citet{dosovitskiy2020image} marked a paradigm shift in computer vision, demonstrating that self-attention mechanisms could achieve competitive or superior performance to convolutional neural networks on image classification tasks. The ViT architecture processes images as sequences of patches, applying transformer encoders to capture global dependencies that convolutional filters inherently struggle to model.
+
+\subsection{Adaptation to Satellite Imagery}
+
+The application of vision transformers to remote sensing presents unique opportunities and challenges. \citet{bazi2021vision} conducted early investigations into ViT for satellite image classification, demonstrating promising results while highlighting the importance of transfer learning from natural image pretraining. Their work established that the attention mechanisms of transformers are particularly well-suited to capturing the spatial dependencies characteristic of Earth observation data.
+
+\citet{aleissaee2023transformers} provide a comprehensive survey of transformer architectures in remote sensing, categorizing approaches by task (classification, detection, segmentation) and architectural design (pure transformer, hybrid CNN-transformer). The survey identifies key adaptations necessary for remote sensing applications, including handling of multispectral channels beyond RGB and integration of spatial metadata.
+
+\subsection{Hierarchical and Efficient Transformers}
+
+The Swin Transformer \citep{liu2021swin} introduced hierarchical feature maps and shifted window attention, enabling efficient processing of high-resolution images while maintaining the ability to capture long-range dependencies. These innovations have proven particularly valuable for remote sensing applications where images typically have much higher resolution than natural image benchmarks.
+
+The Pyramid Vision Transformer (PVT) \citep{wang2021pyramid} similarly addresses the computational challenges of applying attention to dense prediction tasks, introducing a progressive shrinking pyramid that reduces sequence length at deeper stages while maintaining rich multi-scale features. These architectural innovations have become foundational for subsequent work on satellite image analysis.
+
+\section{Satellite Image Time Series Analysis}
+
+Beyond static image classification, many remote sensing applications require analysis of temporal sequences. Satellite image time series (SITS) capture dynamic phenomena including vegetation phenology, urban expansion, and land cover change. Processing such data requires architectures capable of jointly modeling spatial and temporal dependencies.
+
+\subsection{Temporal-Spatial Factorization}
+
+A critical architectural decision in SITS processing is the order of temporal and spatial feature extraction. \citet{tarasiou2023vits} conducted systematic experiments with their Temporal-Spatial Vision Transformer (TSViT), demonstrating that temporal-then-spatial factorization dramatically outperforms spatial-then-temporal approaches, with improvements of up to 29.7\% on crop classification benchmarks.
+
+This finding has profound implications for architecture design: effective SITS models should first extract temporal features capturing phenological patterns, then aggregate spatial context. TSViT additionally introduces acquisition-time-specific positional encodings to handle the irregular temporal sampling inherent to satellite observations, where cloud cover and orbital constraints create variable revisit intervals.
+
+\subsection{Lightweight Architectures}
+
+Operational deployment of SITS models requires computational efficiency, particularly when processing continental-scale image archives. VistaFormer \citep{macdonald2024vistaformer} addresses this challenge through a lightweight encoder-decoder architecture that achieves 90\% reduction in computational requirements while maintaining competitive performance on segmentation tasks.
+
+Key innovations of VistaFormer include position-free attention mechanisms that eliminate the need for learned positional embeddings, and gated convolutions that handle atmospheric noise within the architecture rather than relying entirely on preprocessing. These efficiency-focused designs establish that careful architectural choices can dramatically reduce resource requirements without sacrificing accuracy.
+
+\section{Vegetation Forecasting}
+
+Predicting future vegetation states from historical observations represents a challenging regression task that combines the difficulties of SITS analysis with the additional complexity of temporal extrapolation.
+
+\subsection{Multi-Modal Learning for Geospatial Forecasting}
+
+\citet{benson2024multimodal} introduced Contextformer, a transformer-based architecture for multi-modal vegetation forecasting that achieves state-of-the-art performance on the GreenEarthNet benchmark. Their approach integrates Sentinel-2 imagery with ERA5 meteorological data and static ancillary variables through a context-aware attention mechanism.
+
+Contextformer establishes several important benchmarks:
+\begin{itemize}
+    \item Forecasting horizon of 100 days from 50 days of input context
+    \item Vegetation score metric based on Nash-Sutcliffe Efficiency computed on cloud-free vegetation pixels
+    \item Comparison across multiple model architectures including ConvLSTM, PredRNN, SimVP, and Earthformer
+\end{itemize}
+
+The GreenEarthNet dataset introduced alongside Contextformer provides standardized training and evaluation splits, including out-of-distribution test sets for temporal, spatial, and combined generalization assessment. This benchmark infrastructure enables systematic comparison of vegetation forecasting methods.
+
+\subsection{Explainable Earth Surface Forecasting}
+\label{sec:pellicer_valero}
+
+\citet{pellicer2024explainable} present a particularly relevant approach to vegetation forecasting that prioritizes interpretability alongside accuracy. Their work introduces a growth curve decoder that generates predictions through explicit modeling of vegetation growth dynamics using saturation growth functions.
+
+The key insight of \citet{pellicer2024explainable} is that vegetation temporal dynamics can be effectively approximated by parametric growth curves of the form:
+\begin{equation}
+    \delta(t) = A \cdot (1 - e^{-\lambda t}) + B
+\end{equation}
+where $A$ represents growth amplitude, $\lambda$ the growth rate, and $B$ a baseline offset. These parameters have direct biophysical interpretations: amplitude captures the magnitude of vegetation response, rate determines how quickly the response develops, and offset accounts for systematic biases.
+
+Their architecture uses this growth curve formulation to predict next-timestep vegetation states, with the neural network learning to estimate growth parameters conditioned on historical observations and meteorological context. This approach provides inherent interpretability---predictions can be explained in terms of predicted growth dynamics rather than opaque network activations.
+
+Importantly, \citet{pellicer2024explainable} also demonstrate improved performance under extreme weather events (droughts, heatwaves), suggesting that explicit modeling of growth dynamics enables more robust extrapolation beyond training data distributions.
+
+\section{Research Gaps and Opportunities}
+
+The review of related work reveals several research gaps that motivate the current work:
+
+\subsection{Trajectory vs. Step-by-Step Prediction}
+
+Existing forecasting methods, including the approach of \citet{pellicer2024explainable}, typically predict vegetation states iteratively, generating next-timestep predictions that are then fed back as input for subsequent predictions. This autoregressive approach suffers from error accumulation over long horizons and requires multiple forward passes through the network.
+
+An alternative paradigm is to learn complete trajectories in a single forward pass. Rather than predicting next-step changes, the model directly outputs parameters of a growth curve that describes the entire forecast horizon. This trajectory-based approach offers several advantages:
+\begin{itemize}
+    \item No error accumulation from sequential prediction
+    \item Single forward pass for arbitrary horizon forecasts
+    \item Explicit parameterization of temporal dynamics
+\end{itemize}
+
+\subsection{Regression-Focused Architectures}
+
+The majority of reviewed SITS transformers target classification or segmentation tasks. While encoder architectures are well-developed, dedicated decoder designs optimized for temporal regression remain underexplored. The growth curve decoder concept provides a promising foundation, but its application to full-trajectory prediction requires additional architectural innovations.
+
+\subsection{Efficiency-Accuracy Trade-offs}
+
+State-of-the-art models like Contextformer achieve strong performance but require substantial computational resources (6+ million parameters). For operational deployment, particularly in resource-constrained settings, lightweight alternatives that maintain competitive accuracy are needed.
+
+\section{Summary}
+
+This review has surveyed progress in vision transformers for remote sensing, satellite image time series analysis, and vegetation forecasting. Key findings include:
+
+\begin{enumerate}
+    \item Temporal-then-spatial factorization is critical for effective SITS processing
+    \item Irregular temporal sampling requires explicit handling through specialized positional encodings
+    \item Multi-modal integration of satellite, weather, and land cover data substantially improves forecasting
+    \item Growth curve decoders enable interpretable predictions through biophysically meaningful parameters
+    \item Efficiency-focused architectural innovations can dramatically reduce computational requirements
+\end{enumerate}
+
+The proposed approach builds on these foundations, introducing trajectory-based growth curve learning that combines the interpretability benefits of parametric prediction with efficient single-pass long-horizon forecasting.
