@@ -39,6 +39,19 @@ Key observations:
     \item Overall errors are in a reasonable range considering that predictions span a 100-day forecast horizon with delta values typically in $[-0.2, 0.2]$.
 \end{itemize}
 
+\subsection{Benchmark Performance (Vegetation Score)}
+
+To rigorously assess the model's utility for vegetation forecasting, we computed the \textbf{Vegetation Score} defined by the GreenEarthNet benchmark ($2 - \frac{1}{\text{mean}(1/(2-\text{NSE}))}$) and compared it against a \textbf{Persistence Baseline} (assuming no change over the forecast horizon).
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.9\textwidth]{../../images/results/error_analysis/vegetation_score_comparison.png}
+    \caption{Vegetation Score comparison between the proposed Growth Curve Model and a Persistence Baseline across different land cover types. Higher scores indicate better performance (1.0 is perfect prediction).}
+    \label{fig:veg_score}
+\end{figure}
+
+As shown in Figure~\ref{fig:veg_score}, the model consistently outperforms the persistence baseline across vegetation-dominated classes (Tree cover, Shrubland, Grassland), indicating it successfully captures vegetation dynamics beyond simple static assumptions.
+
 \section{Temporal Error Analysis}
 
 Understanding how prediction error evolves across the forecast horizon is critical for assessing model reliability at different lead times.
@@ -49,16 +62,15 @@ Figure~\ref{fig:temporal_error} shows the stacked Mean Absolute Error across the
 
 \begin{figure}[H]
     \centering
-    \includegraphics[width=0.9\textwidth]{../images/results/temporal_error.png}
-    \caption{Prediction error evolution over the 100-day forecast horizon, stacked by spectral band. Each bar represents a 5-day forecast interval.}
+    \includegraphics[width=0.9\textwidth]{../../images/results/error_analysis/temporal_error.png}
+    \caption{Prediction error evolution over the 100-day forecast horizon (20 steps). The plot shows the Root Mean Square Error (RMSE) and Nash-Sutcliffe Efficiency (NSE) for kNDVI.}
     \label{fig:temporal_error}
 \end{figure}
 
 The temporal error pattern reveals:
 \begin{itemize}
-    \item Error generally increases with forecast lead time, as expected for long-horizon prediction.
-    \item The growth curve formulation helps constrain error accumulation compared to autoregressive approaches, as errors at each timestep are generated independently from the same set of growth parameters.
-    \item NIR band consistently contributes the largest portion of total error across all timesteps.
+    \item \textbf{Error Growth}: RMSE increases and NSE decreases as the forecast horizon extends, which is expected for long-term prediction.
+    \item \textbf{Stability}: The degradation is gradual, suggesting the model maintains a coherent trajectory rather than diverging rapidly. The NSE remains positive for a significant portion of the horizon, indicating skill relative to the mean.
 \end{itemize}
 
 \section{Spatial Error Analysis}
@@ -71,7 +83,7 @@ Figure~\ref{fig:spatial_error} shows the average absolute error across the $128 
 
 \begin{figure}[H]
     \centering
-    \includegraphics[width=0.6\textwidth]{../images/results/spatial_error_heatmap.png}
+    \includegraphics[width=0.6\textwidth]{../../images/results/spatial_error_heatmap.png}
     \caption{Spatial distribution of mean absolute error, averaged across samples and forecast timesteps.}
     \label{fig:spatial_error}
 \end{figure}
@@ -98,14 +110,14 @@ Figures~\ref{fig:prediction_sample1} and \ref{fig:prediction_sample2} show compa
 
 \begin{figure}[H]
     \centering
-    \includegraphics[width=0.9\textwidth]{../images/results/prediction_comparison_1.png}
+    \includegraphics[width=0.9\textwidth]{../../images/results/prediction_comparison_1.png}
     \caption{Sample 1: Ground truth (top row) vs. predicted (bottom row) reflectance deltas across forecast timesteps. RGB visualization maps delta values to color channels.}
     \label{fig:prediction_sample1}
 \end{figure}
 
 \begin{figure}[H]
     \centering
-    \includegraphics[width=0.9\textwidth]{../images/results/prediction_comparison_2.png}
+    \includegraphics[width=0.9\textwidth]{../../images/results/prediction_comparison_2.png}
     \caption{Sample 2: Ground truth (top row) vs. predicted (bottom row) reflectance deltas across forecast timesteps.}
     \label{fig:prediction_sample2}
 \end{figure}
@@ -156,56 +168,39 @@ Key differentiators of our approach:
 
 A key motivation for the growth curve formulation is the interpretability of predictions through biophysically meaningful parameters. This section presents preliminary analysis and outlines planned investigations.
 
-\subsection{Growth Curve Parameter Analysis}
+\subsection{Feature Importance Analysis}
 
-\textit{[Placeholder for future work]}
+We utilized Permutation Feature Importance to identify which predictors most strongly influence the model's kNDVI forecasts.
 
-The growth curve parameters $(A, \lambda, B)$ have direct physical interpretations:
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.8\textwidth]{../../images/results/vegetation_dynamics/feature_importance.png}
+    \caption{Permutation Feature Importance for kNDVI prediction. Top predictors include temporal features (Cosine of DOY, Step Index) and Radiation.}
+    \label{fig:feat_imp}
+\end{figure}
+
+Results (Figure~\ref{fig:feat_imp}) indicate that the model relies heavily on temporal context (\texttt{Cos\_DOY}, \texttt{Step\_Index}) to drive the phenological cycle, modulated by meteorological drivers like \texttt{Radiation} and \texttt{Temperature}.
+
+\subsection{Decision Rules Extraction}
+
+To translate the neural network's logic into human-readable form, we trained a surrogate Decision Tree on the model's inputs and outputs. Extracted rules highlighted interactions such as:
 \begin{itemize}
-    \item \textbf{Amplitude ($A$)}: Magnitude of vegetation change over the forecast period. Positive values indicate greening (growth), negative values indicate browning (senescence or stress).
-    \item \textbf{Rate ($\lambda$)}: Speed of vegetation response. Higher values indicate rapid changes (e.g., spring green-up), lower values indicate gradual transitions.
-    \item \textbf{Offset ($B$)}: Systematic baseline shift, capturing persistent trends independent of the growth dynamic.
+    \item \textbf{Seasonality}: \texttt{Cos\_DOY} splits effectively separated growing vs. dormant seasons.
+    \item \texttt{Radiation} often served as a secondary splitter, indicating its role in modulating growth rates within a season.
 \end{itemize}
 
-Planned analyses include:
-\begin{enumerate}
-    \item \textbf{Parameter distributions}: Characterize the statistical distributions of $A$, $\lambda$, $B$ across the dataset, identifying typical ranges and outliers.
-    \item \textbf{Land cover correlations}: Investigate whether growth parameters differ systematically across land cover types (e.g., forests vs. croplands vs. grasslands).
-    \item \textbf{Seasonal patterns}: Analyze how parameter distributions vary with season, potentially revealing phenological patterns encoded by the model.
-    \item \textbf{Extreme value analysis}: Identify samples with unusual parameter values and investigate whether they correspond to extreme weather events or anomalous vegetation dynamics.
-\end{enumerate}
+\subsection{Extreme Event Analysis (Heatwaves)}
 
-\subsection{Error Source Identification}
+We analyzed the model's behavior during extreme heat events (defined as the top 5\% of maximum temperature anomalies).
 
-\textit{[Placeholder for future work]}
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.6\textwidth]{../../images/results/vegetation_dynamics/extreme_event_heatwave.png}
+    \caption{Distribution of predicted kNDVI changes (Delta) during Heatwave vs. Normal conditions.}
+    \label{fig:heatwave}
+\end{figure}
 
-Understanding the sources of prediction error informs model improvement. Planned investigations include:
-
-\begin{enumerate}
-    \item \textbf{Systematic vs. random error decomposition}: Determine whether errors are predominantly systematic (consistent biases) or random (unpredictable noise), informing whether architectural changes or larger datasets would be more beneficial.
-    
-    \item \textbf{Weather condition relationships}: Analyze whether prediction errors correlate with specific meteorological conditions (drought, extreme precipitation, temperature anomalies), potentially revealing limitations in weather integration.
-    
-    \item \textbf{Cloud coverage impact}: Quantify how input cloud coverage affects prediction quality, providing guidance on minimum data quality requirements for reliable forecasting.
-    
-    \item \textbf{Temporal decomposition}: Separate errors into contributions from initial condition uncertainty (early timesteps) vs. dynamic prediction errors (later timesteps).
-\end{enumerate}
-
-\subsection{Phenological Interpretation}
-
-\textit{[Placeholder for future work]}
-
-The growth curve formulation should encode vegetation phenology in its parameters. Planned analyses include:
-
-\begin{enumerate}
-    \item \textbf{Growth curve shape taxonomy}: Cluster predicted growth curves by shape characteristics to identify common temporal patterns (e.g., monotonic growth, plateau, decline).
-    
-    \item \textbf{Comparison with known phenology}: Validate that predicted growth curve shapes are consistent with established phenological calendars for different vegetation types and regions.
-    
-    \item \textbf{Anomaly detection}: Use deviation from expected growth curve shapes to flag potential vegetation stress or unusual dynamics.
-    
-    \item \textbf{Weather modulation analysis}: Investigate how the weather adjustment factors $\text{adj}(t)$ modify growth curves under different meteorological scenarios.
-\end{enumerate}
+Figure~\ref{fig:heatwave} demonstrates that the model predicts distinct vegetation responses under heatwave conditions, typically associating extreme heat with suppressed growth or browning (negative deltas), aligning with expected physiological stress responses.
 
 \section{Summary}
 

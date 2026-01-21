@@ -1,0 +1,12 @@
+Landcover,VegetationScore_Main,VegetationScore_Baseline,PixelCount,IsVegetation
+Tree cover,-0.8796918392181396,-0.6597068309783936,34169,True
+Shrubland,-1.6358356475830078,-0.9039463996887207,5470,True
+Grassland,-1.4124324321746826,-1.2131128311157227,39628,True
+Cropland,-1.6604218482971191,-0.8788330554962158,837,False
+Built-up,-1.539740800857544,-0.6534824371337891,1816,False
+Bare/sparse,,,0,False
+Snow/ice,,,0,False
+Water,,,0,False
+Wetland,,,0,False
+Mangroves,,,0,False
+Moss/lichen,,,0,False
