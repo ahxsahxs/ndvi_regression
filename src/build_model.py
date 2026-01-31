@@ -119,7 +119,7 @@ class RegressionParameterHead(layers.Layer):
         # Learnable scale/bias to prevent trivial zero outputs
         self.A_scale = self.add_weight(
             name='A_scale', shape=(1, 1, 1, n_bands),
-            initializer=keras.initializers.Constant(0.2),
+            initializer=keras.initializers.Constant(1.0),
             trainable=True
         )
         self.lambda_min = self.add_weight(
@@ -166,7 +166,7 @@ class RegressionParameterHead(layers.Layer):
         # --- Offset B ---
         # Small offset, bounded to prevent B from absorbing all variation
         B_raw = self.conv_B(x)
-        B = tf.tanh(B_raw) * 0.1  # Bounded to [-0.1, 0.1]
+        B = tf.tanh(B_raw) * 0.5  # Bounded to [-0.5, 0.5]
         
         return A, lambda_param, B
     

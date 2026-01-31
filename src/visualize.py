@@ -25,7 +25,7 @@ def adapt_inputs(x, y):
     }
     return x_new, y
 
-def visualize(model_epoch=None):
+def visualize(model_epoch=None, mode='deltas'):
     if model_epoch is None:
         model_path = os.path.join(CHECKPOINTS_DIR, "final_model.keras")
     else:
@@ -123,7 +123,10 @@ def visualize(model_epoch=None):
         fig, axes = plt.subplots(4, n_cols, figsize=(3 * n_cols, 3 * 4))
         fig.suptitle(f"Sample {sample_idx}", fontsize=16)
         
-        row_labels = ['X Input (RGB)', 'Y Output (RGB)', 'True Delta (RGB)', 'Pred Delta (RGB)']
+        if mode == 'reconstructed':
+            row_labels = ['X Input (RGB)', 'Y Output (BAP)', 'True Image', 'Reconstructed Image']
+        else:
+            row_labels = ['X Input (RGB)', 'Y Output (RGB)', 'True Delta (RGB)', 'Pred Delta (RGB)']
         
         for col_idx in range(n_cols):
             # Row 0: X input RGB
@@ -140,17 +143,37 @@ def visualize(model_epoch=None):
             axes[1, col_idx].set_title(f"t={t_y}")
             axes[1, col_idx].axis('off')
             
-            # Row 2: True delta RGB (with cloud mask)
-            delta_true_rgb = make_delta_rgb(true_deltas[t_y], cloudmask[t_y])
-            axes[2, col_idx].imshow(delta_true_rgb)
-            axes[2, col_idx].set_title(f"t={t_y}")
-            axes[2, col_idx].axis('off')
-            
-            # Row 3: Predicted delta RGB (no cloud mask - show raw predictions)
-            delta_pred_rgb = make_delta_rgb(pred_deltas[t_y])
-            axes[3, col_idx].imshow(delta_pred_rgb)
-            axes[3, col_idx].set_title(f"t={t_y}")
-            axes[3, col_idx].axis('off')
+            if mode == 'reconstructed':
+                # Row 2: True Image (BAP + True Delta)
+                # Need to add mask back if we want? But user asked for Reconstructed vs Real
+                # We calculate Real = BAP + True Delta
+                real_image = y_bap[t_y] + true_deltas[t_y]
+                rgb_real = make_rgb(real_image)
+                axes[2, col_idx].imshow(rgb_real)
+                axes[2, col_idx].set_title(f"t={t_y}")
+                axes[2, col_idx].axis('off')
+                
+                # Row 3: Reconstructed Image (BAP + Pred Delta)
+                reconstructed_image = y_bap[t_y] + pred_deltas[t_y]
+                # Ensure we don't have negative values or weird artifacts before rgb conversion if needed, 
+                # but make_rgb handles clipping.
+                rgb_recon = make_rgb(reconstructed_image)
+                axes[3, col_idx].imshow(rgb_recon)
+                axes[3, col_idx].set_title(f"t={t_y}")
+                axes[3, col_idx].axis('off')
+
+            else:
+                # Row 2: True delta RGB (with cloud mask)
+                delta_true_rgb = make_delta_rgb(true_deltas[t_y], cloudmask[t_y])
+                axes[2, col_idx].imshow(delta_true_rgb)
+                axes[2, col_idx].set_title(f"t={t_y}")
+                axes[2, col_idx].axis('off')
+                
+                # Row 3: Predicted delta RGB (no cloud mask - show raw predictions)
+                delta_pred_rgb = make_delta_rgb(pred_deltas[t_y])
+                axes[3, col_idx].imshow(delta_pred_rgb)
+                axes[3, col_idx].set_title(f"t={t_y}")
+                axes[3, col_idx].axis('off')
         
         # Add row labels on the left
         for row_idx, label in enumerate(row_labels):
@@ -175,5 +198,12 @@ if __name__ == "__main__":
         default=None,
         help="Epoch number to load model_at_{epoch}.keras. If not specified, loads final_model.keras."
     )
+    parser.add_argument(
+        "--mode",
+        type=str,
+        default='deltas',
+        choices=['deltas', 'reconstructed'],
+        help="Visualization mode: 'deltas' (default) to show delta maps, 'reconstructed' to show BAP + deltas."
+    )
     args = parser.parse_args()
-    visualize(model_epoch=args.model)
+    visualize(model_epoch=args.model, mode=args.mode)

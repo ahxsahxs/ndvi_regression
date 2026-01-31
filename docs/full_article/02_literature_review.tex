@@ -4,6 +4,8 @@
 \chapter{Literature Review}
 \label{chap:literature_review}
 
+### TODO: I need to include more material from ConvLSTM architectures and their applications to remote sensing.
+
 This chapter reviews the state of the art in deep learning for satellite image analysis, with particular focus on vision transformers, satellite image time series (SITS) processing, and vegetation forecasting. The review synthesizes insights from computer vision, remote sensing, and agricultural monitoring to establish the theoretical and methodological foundations for the proposed approach.
 
 \section{Vision Transformers in Remote Sensing}
@@ -44,7 +46,7 @@ Predicting future vegetation states from historical observations represents a ch
 
 \subsection{Multi-Modal Learning for Geospatial Forecasting}
 
-\citet{benson2024multimodal} introduced Contextformer, a transformer-based architecture for multi-modal vegetation forecasting that achieves state-of-the-art performance on the GreenEarthNet benchmark. Their approach integrates Sentinel-2 imagery with ERA5 meteorological data and static ancillary variables through a context-aware attention mechanism.
+\citet{benson2024multimodal} introduced Contextformer, a transformer-based architecture for multi-modal vegetation forecasting that achieves state-of-the-art performance on the GreenEarthNet benchmark. Their approach integrates Sentinel-2 imagery with E-OBS meteorological data and static ancillary variables through a context-aware attention mechanism.
 
 Contextformer establishes several important benchmarks:
 \begin{itemize}
@@ -58,17 +60,16 @@ The GreenEarthNet dataset introduced alongside Contextformer provides standardiz
 \subsection{Explainable Earth Surface Forecasting}
 \label{sec:pellicer_valero}
 
-\citet{pellicer2024explainable} present a particularly relevant approach to vegetation forecasting that prioritizes interpretability alongside accuracy. Their work introduces a growth curve decoder that generates predictions through explicit modeling of vegetation growth dynamics using saturation growth functions.
+\citet{pellicer2024explainable} present a significant advancement in vegetation forecasting by focusing on Explainable AI (XAI) for extreme events. Their work employs a Convolutional LSTM (ConvLSTM) architecture to predict future vegetation states (as measured by kNDVI) based on historical satellite imagery and meteorological data.
 
-The key insight of \citet{pellicer2024explainable} is that vegetation temporal dynamics can be effectively approximated by parametric growth curves of the form:
-\begin{equation}
-    \delta(t) = A \cdot (1 - e^{-\lambda t}) + B
-\end{equation}
-where $A$ represents growth amplitude, $\lambda$ the growth rate, and $B$ a baseline offset. These parameters have direct biophysical interpretations: amplitude captures the magnitude of vegetation response, rate determines how quickly the response develops, and offset accounts for systematic biases.
+Key contributions of their approach include:
+\begin{itemize}
+    \item \textbf{DeepExtremeCubes Dataset}: A novel dataset specifically curated for analyzing extreme climate events.
+    \item \textbf{ConvLSTM Architecture}: A recurrent neural network design that effectively captures spatiotemporal dependencies for iterative next-step prediction.
+    \item \textbf{Interpretability}: The application of feature attribution methods (specifically Integrated Gradients) to understand model decision-making during heatwaves and droughts.
+\end{itemize}
 
-Their architecture uses this growth curve formulation to predict next-timestep vegetation states, with the neural network learning to estimate growth parameters conditioned on historical observations and meteorological context. This approach provides inherent interpretability---predictions can be explained in terms of predicted growth dynamics rather than opaque network activations.
-
-Importantly, \citet{pellicer2024explainable} also demonstrate improved performance under extreme weather events (droughts, heatwaves), suggesting that explicit modeling of growth dynamics enables more robust extrapolation beyond training data distributions.
+Unlike the parametric growth curve approach proposed in this thesis, \citet{pellicer2024explainable} rely on a non-parametric deep learning model to learn the transition dynamics between timesteps. Their study successfully demonstrates that deep learning models can robustly forecast vegetation vegetation dynamics even under extreme conditions, while providing crucial insights into which environmental variables drive these predictions.
 
 \section{Research Gaps and Opportunities}
 
@@ -76,7 +77,7 @@ The review of related work reveals several research gaps that motivate the curre
 
 \subsection{Trajectory vs. Step-by-Step Prediction}
 
-Existing forecasting methods, including the approach of \citet{pellicer2024explainable}, typically predict vegetation states iteratively, generating next-timestep predictions that are then fed back as input for subsequent predictions. This autoregressive approach suffers from error accumulation over long horizons and requires multiple forward passes through the network.
+Existing forecasting methods, including the ConvLSTM approach of \citet{pellicer2024explainable}, typically predict vegetation states iteratively, generating next-timestep predictions that are then fed back as input for subsequent predictions. This autoregressive approach can suffer from error accumulation over long horizons and requires multiple forward passes through the network to generate a multi-step forecast.
 
 An alternative paradigm is to learn complete trajectories in a single forward pass. Rather than predicting next-step changes, the model directly outputs parameters of a growth curve that describes the entire forecast horizon. This trajectory-based approach offers several advantages:
 \begin{itemize}

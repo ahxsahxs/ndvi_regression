@@ -152,11 +152,11 @@ class ImprovedkNDVILoss(keras.losses.Loss):
     """
     def __init__(
         self, 
-        regression_weight=10.0,  # Primary objective weight
-        variance_weight=1.0,     # Regularizer weight
+        regression_weight=5.0,   # Primary objective weight
+        variance_weight=2.0,     # Regularizer weight
         kndvi_weight=0.0,        # Auxiliary loss weight (0 = disabled, set via callback)
         kndvi_clip=0.5,          # Max kNDVI difference (gradient clipping)
-        sigma=0.5,               # RBF kernel sigma
+        sigma=1.0,               # RBF kernel sigma
         name='improved_kndvi_loss', 
         **kwargs
     ):
@@ -197,7 +197,7 @@ class ImprovedkNDVILoss(keras.losses.Loss):
         # Expected range: ~0.001 to 0.05 for well-behaved deltas
         reg_loss = self.fn_huber(true_deltas, pred_deltas)
         masked_reg_loss = reg_loss * tf.squeeze(sample_weight, axis=-1)
-        total_reg_loss = tf.reduce_sum(masked_reg_loss) / weight_sum
+        total_reg_loss = (tf.reduce_sum(masked_reg_loss) / weight_sum) * 10.0
         
         # --- 2. Variance Penalty (prevent mode collapse) ---
         # Compute spatial variance of true and predicted deltas per sample
@@ -238,8 +238,8 @@ class ImprovedkNDVILoss(keras.losses.Loss):
         kndvi_diff = tf.minimum(kndvi_diff, self.kndvi_clip)
         
         masked_kndvi_loss = kndvi_diff * tf.squeeze(sample_weight, axis=-1)
-        # Scale by 0.1 to bring into similar range as regression loss
-        total_kndvi_loss = tf.reduce_sum(masked_kndvi_loss) / weight_sum * 0.1
+        # Scale by 1.0 (no scaling needed as kNDVI is already in [0,1] range approx, diffs are small)
+        total_kndvi_loss = tf.reduce_sum(masked_kndvi_loss) / weight_sum
         
         # --- Combine Losses with Weights ---
         # All components now normalized to ~0.01-0.1 range before weighting

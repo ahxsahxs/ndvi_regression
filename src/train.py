@@ -102,8 +102,10 @@ def train_bspline_model(
             clipnorm=1.0  # Gradient clipping to prevent exploding gradients
         )
         loss = ImprovedkNDVILoss(
+            regression_weight=5.0,
+            variance_weight=2.0,
             kndvi_clip=0.5,      # Gradient clipping threshold
-            sigma=0.5            # RBF kernel sigma
+            sigma=1.0            # RBF kernel sigma
         )
         model.compile(optimizer=optimizer, loss=loss)
 
@@ -199,7 +201,39 @@ def train_bspline_model(
     print("Training complete.")
 
 
+
+def configure_gpu():
+    """
+    Configures GPU memory growth and limits to prevent allocation failures.
+    
+    Sets memory growth to True for all physical devices and enforces a
+    maximum memory limit of 32GB (32 * 1024 MB) per GPU.
+    """
+    gpus = tf.config.list_physical_devices('GPU')
+    if gpus:
+        try:
+            for gpu in gpus:
+                tf.config.experimental.set_memory_growth(gpu, True)
+                
+                # Set approximate memory limit (32GB)
+                # This prevents TF from taking all memory if multiple processes are running
+                tf.config.set_logical_device_configuration(
+                    gpu,
+                    [tf.config.LogicalDeviceConfiguration(memory_limit=32*1024)]
+                )
+            
+            logical_gpus = tf.config.list_logical_devices('GPU')
+            print(f"{len(gpus)} Physical GPUs, {len(logical_gpus)} Logical GPUs")
+            print("GPU Memory Growth Enabled & Limited to 32GB")
+        except RuntimeError as e:
+            # Memory growth must be set before GPUs have been initialized
+            print(e)
+
+
 def main():
+    # Configure GPUs before any other TensorFlow operations
+    configure_gpu()
+
     parser = argparse.ArgumentParser(description="Train BSpline NDVI Model")
     
     # Path Arguments
@@ -210,7 +244,7 @@ def main():
     parser.add_argument('--resume_from', type=str, default=None, help='Path to .keras model file to resume training from')
     
     # Hyperparameters
-    parser.add_argument('--batch_size', type=int, default=1, help='Batch size')
+    parser.add_argument('--batch_size', type=int, default=32, help='Batch size')
     parser.add_argument('--epochs', type=int, default=500, help='Number of epochs')
     parser.add_argument('--learning_rate', type=float, default=3e-4, help='Initial learning rate')
     parser.add_argument('--initial_epoch', type=int, default=0, help='Epoch to start/resume from')

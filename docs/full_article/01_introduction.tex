@@ -45,7 +45,7 @@ This research addresses the aforementioned challenges through the development of
 The main contributions of this work are:
 
 \begin{enumerate}
-    \item \textbf{Growth Curve Trajectory Learning}: A novel approach to vegetation forecasting that learns complete saturation growth curve trajectories rather than predicting iteratively step-by-step. While inspired by the growth curve decoder concept introduced by \citet{pellicer2024explainable}, our method fundamentally differs by fitting entire 100-day trajectories in a single forward pass, enabling efficient long-horizon prediction without error accumulation.
+    \item \textbf{Growth Curve Trajectory Learning}: A novel approach to vegetation forecasting that learns complete saturation growth curve trajectories rather than predicting iteratively step-by-step. Unlike the iterative ConvLSTM approach of \citet{pellicer2024explainable}, our method fits entire 100-day trajectories in a single forward pass, enabling efficient long-horizon prediction without error accumulation.
     
     \item \textbf{Weather-Adjusted Growth Dynamics}: An architecture component that modulates growth curve parameters based on meteorological conditions, allowing the model to capture weather-dependent variations in vegetation response while maintaining the interpretable growth curve structure.
     
@@ -55,6 +55,8 @@ The main contributions of this work are:
 \end{enumerate}
 
 \section{Thesis Structure}
+
+### TODO: This cannot be a list. I need to explain the thesis structure using paragraphs.
 
 The remainder of this thesis is organized as follows:
 

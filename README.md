@@ -254,3 +254,11 @@ python src/train.py \
 - xarray
 - pandas
 - glob
+
+### Installation
+
+To install the required dependencies, run:
+
+```bash
+conda install -c conda-forge tensorflow numpy pandas matplotlib seaborn scikit-learn xarray
+```

@@ -48,24 +48,24 @@
 \contentsline {subsection}{\numberline {3.4.2}Variance Penalty}{23}{subsection.3.4.2}%
 \contentsline {subsection}{\numberline {3.4.3}kNDVI Loss}{24}{subsection.3.4.3}%
 \contentsline {subsection}{\numberline {3.4.4}Combined Loss}{24}{subsection.3.4.4}%
-\contentsline {subsection}{\numberline {3.4.5}EnablekNDVICallback}{24}{subsection.3.4.5}%
 \contentsline {section}{\numberline {3.5}Training Configuration}{25}{section.3.5}%
 \contentsline {subsection}{\numberline {3.5.1}Optimization}{25}{subsection.3.5.1}%
 \contentsline {subsection}{\numberline {3.5.2}Model Size}{25}{subsection.3.5.2}%
-\contentsline {subsection}{\numberline {3.5.3}Hardware}{26}{subsection.3.5.3}%
-\contentsline {chapter}{\numberline {4}Results}{27}{chapter.4}%
-\contentsline {section}{\numberline {4.1}Error Metrics}{27}{section.4.1}%
-\contentsline {subsection}{\numberline {4.1.1}Per-Band Performance}{27}{subsection.4.1.1}%
+\contentsline {subsection}{\numberline {3.5.3}Hardware}{25}{subsection.3.5.3}%
+\contentsline {chapter}{\numberline {4}Results}{26}{chapter.4}%
+\contentsline {section}{\numberline {4.1}Error Metrics}{26}{section.4.1}%
+\contentsline {subsection}{\numberline {4.1.1}Per-Band Performance}{26}{subsection.4.1.1}%
+\contentsline {subsection}{\numberline {4.1.2}Benchmark Performance (Vegetation Score)}{27}{subsection.4.1.2}%
 \contentsline {section}{\numberline {4.2}Temporal Error Analysis}{28}{section.4.2}%
 \contentsline {subsection}{\numberline {4.2.1}Error Evolution Over Forecast Horizon}{28}{subsection.4.2.1}%
-\contentsline {section}{\numberline {4.3}Spatial Error Analysis}{30}{section.4.3}%
-\contentsline {subsection}{\numberline {4.3.1}Error Heatmap}{30}{subsection.4.3.1}%
-\contentsline {subsection}{\numberline {4.3.2}Land Cover Class Performance}{31}{subsection.4.3.2}%
-\contentsline {section}{\numberline {4.4}Prediction Visualization}{31}{section.4.4}%
-\contentsline {subsection}{\numberline {4.4.1}Ground Truth vs. Prediction Comparison}{31}{subsection.4.4.1}%
-\contentsline {section}{\numberline {4.5}Model Comparison}{33}{section.4.5}%
-\contentsline {section}{\numberline {4.6}Interpretability Analysis}{34}{section.4.6}%
-\contentsline {subsection}{\numberline {4.6.1}Growth Curve Parameter Analysis}{34}{subsection.4.6.1}%
-\contentsline {subsection}{\numberline {4.6.2}Error Source Identification}{35}{subsection.4.6.2}%
-\contentsline {subsection}{\numberline {4.6.3}Phenological Interpretation}{36}{subsection.4.6.3}%
-\contentsline {section}{\numberline {4.7}Summary}{36}{section.4.7}%
+\contentsline {section}{\numberline {4.3}Spatial Error Analysis}{29}{section.4.3}%
+\contentsline {subsection}{\numberline {4.3.1}Error Heatmap}{29}{subsection.4.3.1}%
+\contentsline {subsection}{\numberline {4.3.2}Land Cover Class Performance}{30}{subsection.4.3.2}%
+\contentsline {section}{\numberline {4.4}Prediction Visualization}{30}{section.4.4}%
+\contentsline {subsection}{\numberline {4.4.1}Ground Truth vs. Prediction Comparison}{30}{subsection.4.4.1}%
+\contentsline {section}{\numberline {4.5}Model Comparison}{31}{section.4.5}%
+\contentsline {section}{\numberline {4.6}Interpretability Analysis}{32}{section.4.6}%
+\contentsline {subsection}{\numberline {4.6.1}Feature Importance Analysis}{32}{subsection.4.6.1}%
+\contentsline {subsection}{\numberline {4.6.2}Decision Rules Extraction}{33}{subsection.4.6.2}%
+\contentsline {subsection}{\numberline {4.6.3}Extreme Event Analysis (Heatwaves)}{33}{subsection.4.6.3}%
+\contentsline {section}{\numberline {4.7}Summary}{34}{section.4.7}%

@@ -4,7 +4,7 @@
 \chapter{Materials and Methods}
 \label{chap:materials_methods}
 
-This chapter describes the dataset, preprocessing pipeline, model architecture, loss function design, and training configuration used in this work. The methodology builds upon the GreenEarthNet benchmark \citep{benson2024multimodal} while introducing a novel growth curve trajectory learning approach inspired by \citet{pellicer2024explainable}.
+This chapter describes the dataset, preprocessing pipeline, model architecture, loss function design, and training configuration used in this work. The methodology builds upon the GreenEarthNet benchmark \citep{benson2024multimodal} while introducing a novel growth curve trajectory learning approach.
 
 \section{Dataset: GreenEarthNet}
 
@@ -92,9 +92,9 @@ GreenEarthNet provides standardized splits for training and evaluation:
         \toprule
         \textbf{Split} & \textbf{Samples} & \textbf{Description} \\
         \midrule
-        train & 23,816 & Training set (85 tiles) \\
-        val\_chopped & -- & IID validation set \\
-        ood-t & -- & Out-of-distribution temporal \\
+        train & 14,213 & Training set (85 tiles) \\
+        val\_chopped & 952 & IID validation set \\
+        ood-t & 1,904 & Out-of-distribution temporal \\
         ood-s & -- & Out-of-distribution spatial \\
         ood-st & -- & Out-of-distribution spatio-temporal \\
         \bottomrule
@@ -110,6 +110,8 @@ Raw observations require preprocessing to handle missing data, cloud contaminati
 Sentinel-2 observations include a cloud mask derived from the Sen2Cor processor. Cloud-contaminated pixels are marked as invalid along with pixels containing NaN values (sensor errors, missing data). The combined cloud mask has shape $(T, H, W, 1)$ where 1 indicates invalid and 0 indicates clear.
 
 \subsection{Best Available Pixel (BAP) Compositing}
+
+### TODO: I need to explain what is delta prediction before I can explain BAP.
 
 To provide a consistent reference for delta prediction, a Best Available Pixel (BAP) composite is computed. For each pixel location, the algorithm iterates backwards through the temporal sequence to find the most recent clear (non-cloudy) observation:
 
@@ -131,6 +133,9 @@ The model predicts reflectance deltas relative to the BAP composite rather than 
 
 \subsection{Weather Feature Engineering}
 
+
+### TODO: This methodology is the same as in the pellicer paper. I should reference it and just explain it briefly.
+
 Raw meteorological variables require transformation to capture both absolute values and anomalies. A climatology-based detrending approach is applied:
 
 \begin{enumerate}
@@ -148,6 +153,8 @@ This yields a weather feature tensor of shape $(20, 21)$ representing 7 variable
 
 \subsection{Temporal Metadata}
 
+### TODO: Explain why the temporal metadata is being added and how it can be used to track phenological features. Be more verbose and explicit in the day of the year cyclic encoding.
+
 Temporal context is encoded through three features:
 \begin{itemize}
     \item Year normalization: $(\text{year} - 2017) / 4$ for the 2017--2021 range
@@ -156,7 +163,7 @@ Temporal context is encoded through three features:
 
 \section{Model Architecture}
 
-The proposed architecture consists of a latent space encoder, regression parameter head, weather-time adjustment MLP, growth curve layer, and spatial smoothing layer. The design is inspired by the growth curve decoder concept of \citet{pellicer2024explainable}, with the key innovation of learning full trajectories rather than next-step predictions.
+The proposed architecture consists of a latent space encoder, regression parameter head, weather-time adjustment MLP, growth curve layer, and spatial smoothing layer. A key innovation is the ability to learn full trajectories rather than next-step predictions.
 
 \subsection{Architecture Overview}
 
@@ -240,7 +247,7 @@ where:
     \item $\text{adj}(t)$ is the weather-time adjustment factor
 \end{itemize}
 
-This formulation represents a saturation growth curve with weather-modulated rate. Unlike the approach of \citet{pellicer2024explainable} which uses the growth curve to predict next-step changes, our method directly generates predictions for all 20 timesteps in a single forward pass, enabling efficient long-horizon forecasting without error accumulation.
+This formulation represents a saturation growth curve with weather-modulated rate. Unlike the approach of \citet{pellicer2024explainable} which predicts next-step kNDVI values, our method directly generates predictions for all 20 timesteps in a single forward pass, enabling efficient long-horizon forecasting without error accumulation.
 
 \subsection{Spatial Smoothing Layer}
 
@@ -265,10 +272,9 @@ The Huber loss with $\delta=0.1$ provides robustness to outliers while maintaini
 To prevent mode collapse where the model predicts constant values across spatial locations, a variance penalty encourages matching the spatial variance of predictions to ground truth:
 
 \begin{equation}
-    \mathcal{L}_{\text{var}} = |\text{Var}_{\text{spatial}}(\delta_{\text{true}}) - \text{Var}_{\text{spatial}}(\delta_{\text{pred}})| \times 100
+    \mathcal{L}_{\text{var}} = |\text{Var}_{\text{spatial}}(\delta_{\text{true}}) - \text{Var}_{\text{spatial}}(\delta_{\text{pred}})|
 \end{equation}
 
-The scaling factor ensures this component contributes meaningfully relative to the regression loss.
 
 \subsection{kNDVI Loss}
 
@@ -284,7 +290,7 @@ The kernel NDVI (kNDVI) loss provides spectral consistency by ensuring predictio
     \mathcal{L}_{\text{kndvi}} = \min(|\text{kNDVI}_{\text{true}} - \text{kNDVI}_{\text{pred}}|, 0.5) \times 0.1
 \end{equation}
 
-where $n$ and $r$ are NIR and Red reflectance values respectively, and $\sigma=0.5$ is the RBF kernel parameter. The kNDVI formulation \citep{camps2021unified} provides a more robust vegetation index than traditional NDVI.
+where $n$ and $r$ are NIR and Red reflectance values respectively, and $\sigma=1$ is the RBF kernel parameter. The kNDVI formulation \citep{camps2021unified} provides a more robust vegetation index than traditional NDVI.
 
 \subsection{Combined Loss}
 
@@ -295,17 +301,6 @@ The total loss is a weighted combination of components:
 \end{equation}
 
 Default weights are $w_{\text{reg}} = 10.0$, $w_{\text{var}} = 1.0$, and $w_{\text{kndvi}} = 0.0 \rightarrow 1.0$ (enabled via callback after warmup).
-
-\subsection{EnablekNDVICallback}
-
-The kNDVI component is initially disabled to allow the model to first learn basic regression dynamics. After a warmup period (default 20 epochs), a callback enables the kNDVI loss component to refine spectral consistency:
-
-\begin{equation}
-    w_{\text{kndvi}} = \begin{cases}
-        0.0 & \text{if epoch} < 20 \\
-        1.0 & \text{if epoch} \geq 20
-    \end{cases}
-\end{equation}
 
 \section{Training Configuration}
 

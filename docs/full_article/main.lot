@@ -9,5 +9,5 @@
 \contentsline {table}{\numberline {3.5}{\ignorespaces Training hyperparameters\relax }}{25}{table.caption.15}%
 \contentsline {table}{\numberline {3.6}{\ignorespaces Model parameter count by component\relax }}{25}{table.caption.16}%
 \addvspace {10\p@ }
-\contentsline {table}{\numberline {4.1}{\ignorespaces Per-band error metrics on validation set\relax }}{27}{table.caption.17}%
-\contentsline {table}{\numberline {4.2}{\ignorespaces Model comparison on GreenEarthNet benchmark\relax }}{34}{table.caption.22}%
+\contentsline {table}{\numberline {4.1}{\ignorespaces Per-band error metrics on validation set\relax }}{26}{table.caption.17}%
+\contentsline {table}{\numberline {4.2}{\ignorespaces Model comparison on GreenEarthNet benchmark\relax }}{31}{table.caption.23}%
