@@ -129,16 +129,10 @@ def make_delta_rgb(data, vmin=-0.1, vmax=0.1):
     return rgb
 
 
-def compute_kndvi(nir, red, sigma=0.5):
-    """Compute kernel NDVI using RBF kernel.
-    
-    kNDVI = (1 - k(nir, red)) / (1 + k(nir, red))
-    where k(a, b) = exp(-(a-b)^2 / (2*sigma^2))
-    """
-    diff_sq = (nir - red) ** 2
-    k = np.exp(-diff_sq / (2 * sigma ** 2))
-    kndvi = (1 - k) / (1 + k + 1e-8)
-    return kndvi
+def compute_ndvi(nir, red):
+    """Compute standard NDVI = (NIR - Red) / (NIR + Red).
+    Matches the official EarthNet benchmark protocol."""
+    return (nir - red) / (nir + red + 1e-8)
 
 
 # =============================================================================
@@ -501,6 +495,16 @@ def collect_prediction_metrics(model, generator, max_samples=50):
         # Per-timestep, per-band error tracking for stacked chart
         'band_timestep_error_sum': np.zeros((n_timesteps, n_bands)),
         'band_timestep_pixel_count': np.zeros((n_timesteps, n_bands)),
+        # NDVI metrics for temporal error plot (Chapter 4 Figure 4.1)
+        'ndvi_sse_per_timestep': np.zeros(n_timesteps),  # Sum of squared errors
+        'ndvi_sum_per_timestep': np.zeros(n_timesteps),  # Sum of observations
+        'ndvi_sum_sq_per_timestep': np.zeros(n_timesteps),  # Sum of squared observations
+        'ndvi_count_per_timestep': np.zeros(n_timesteps),  # Count of valid pixels
+        # NDVI metrics per landcover class
+        'lc_ndvi_sse': np.zeros(n_landcover_classes),
+        'lc_ndvi_sum': np.zeros(n_landcover_classes),
+        'lc_ndvi_sum_sq': np.zeros(n_landcover_classes),
+        'lc_ndvi_count': np.zeros(n_landcover_classes),
     }
     
     for i, (x, y, landcover) in enumerate(dataset):
@@ -540,30 +544,57 @@ def collect_prediction_metrics(model, generator, max_samples=50):
         sample_error = np.abs(diff).mean()
         metrics['sample_errors'].append(sample_error)
         
-        # Per-landcover class MAE
-        # Average error across time and bands: (H, W)
-        pixel_error = np.abs(diff).mean(axis=(0, 3))  # Average over time and bands
-        valid_pixel_mask = (1 - cloudmask).mean(axis=0)  # (H, W) - fraction of valid timesteps
+        # Compute NDVI for temporal/landcover error analysis
+        # NIR = band 3, Red = band 2
+        true_abs = bap + true_deltas
+        pred_abs = bap + pred
+        true_ndvi = np.clip(compute_ndvi(true_abs[..., 3], true_abs[..., 2]), -1.0, 1.0)  # (T, H, W)
+        pred_ndvi = np.clip(compute_ndvi(pred_abs[..., 3], pred_abs[..., 2]), -1.0, 1.0)  # (T, H, W)
         
-        for lc_idx in range(n_landcover_classes):
-            # Get pixels belonging to this landcover class
-            lc_mask = landcover_map[:, :, lc_idx]  # (H, W)
-            # Weight by both landcover membership and cloud validity
-            weight = lc_mask * valid_pixel_mask
-            metrics['lc_error_sum'][lc_idx] += (pixel_error * weight).sum()
-            metrics['lc_pixel_count'][lc_idx] += weight.sum()
-        
-        # Per-timestep, per-band error for stacked chart
+        # Per-timestep NDVI metrics for Figure 4.1
         actual_timesteps = min(pred.shape[0], n_timesteps)
         for t in range(actual_timesteps):
-            timestep_valid = 1 - cloudmask[t]  # (H, W)
+            timestep_valid = (1 - cloudmask[t])  # (H, W)
             valid_pixels = timestep_valid.sum()
             
+            if valid_pixels > 0:
+                true_t = true_ndvi[t] * timestep_valid
+                pred_t = pred_ndvi[t] * timestep_valid
+                
+                # SSE: Sum of squared errors
+                sq_diff = ((true_ndvi[t] - pred_ndvi[t]) ** 2) * timestep_valid
+                metrics['ndvi_sse_per_timestep'][t] += sq_diff.sum()
+                
+                # Sum, sum of squares, and count for NSE calculation
+                metrics['ndvi_sum_per_timestep'][t] += (true_ndvi[t] * timestep_valid).sum()
+                metrics['ndvi_sum_sq_per_timestep'][t] += ((true_ndvi[t] ** 2) * timestep_valid).sum()
+                metrics['ndvi_count_per_timestep'][t] += valid_pixels
+                
+            # Per-band error for stacked chart
             for band_idx in range(4):
-                # Error at this timestep for this band: (H, W)
                 band_error = np.abs(diff[t, :, :, band_idx])
                 metrics['band_timestep_error_sum'][t, band_idx] += (band_error * timestep_valid).sum()
                 metrics['band_timestep_pixel_count'][t, band_idx] += valid_pixels
+        
+        # Per-landcover class MAE and NDVI metrics
+        pixel_error = np.abs(diff).mean(axis=(0, 3))  # Average over time and bands
+        valid_pixel_mask = (1 - cloudmask).mean(axis=0)  # (H, W)
+        
+        # NDVI per-pixel error averaged over time
+        ndvi_pixel_sse = ((true_ndvi - pred_ndvi) ** 2).mean(axis=0)  # (H, W)
+        ndvi_pixel_mean = true_ndvi.mean(axis=0)  # (H, W)
+        
+        for lc_idx in range(n_landcover_classes):
+            lc_mask = landcover_map[:, :, lc_idx]  # (H, W)
+            weight = lc_mask * valid_pixel_mask
+            metrics['lc_error_sum'][lc_idx] += (pixel_error * weight).sum()
+            metrics['lc_pixel_count'][lc_idx] += weight.sum()
+            
+            # NDVI metrics per landcover
+            metrics['lc_ndvi_sse'][lc_idx] += (ndvi_pixel_sse * weight).sum()
+            metrics['lc_ndvi_sum'][lc_idx] += (ndvi_pixel_mean * weight).sum()
+            metrics['lc_ndvi_sum_sq'][lc_idx] += ((ndvi_pixel_mean ** 2) * weight).sum()
+            metrics['lc_ndvi_count'][lc_idx] += weight.sum()
         
         # Store a few samples for visualization
         if len(metrics['predictions']) < 5:
@@ -595,6 +626,53 @@ def collect_prediction_metrics(model, generator, max_samples=50):
         metrics['band_timestep_pixel_count'],
         out=np.zeros_like(metrics['band_timestep_error_sum']),
         where=metrics['band_timestep_pixel_count'] > 0
+    )
+    
+    # Compute NDVI RMSE per timestep (for Figure 4.1)
+    metrics['ndvi_rmse_per_timestep'] = np.sqrt(np.divide(
+        metrics['ndvi_sse_per_timestep'],
+        metrics['ndvi_count_per_timestep'],
+        out=np.zeros_like(metrics['ndvi_sse_per_timestep']),
+        where=metrics['ndvi_count_per_timestep'] > 0
+    ))
+    
+    # Compute NDVI NSE per timestep using single-pass variance decomposition
+    # SST = sum(x^2) - (sum(x))^2 / N
+    count_safe = np.maximum(metrics['ndvi_count_per_timestep'], 1)
+    sst_per_timestep = (
+        metrics['ndvi_sum_sq_per_timestep']
+        - (metrics['ndvi_sum_per_timestep'] ** 2) / count_safe
+    )
+    # NSE = 1 - SSE / SST (where SST > 0)
+    metrics['ndvi_nse_per_timestep'] = np.where(
+        sst_per_timestep > 0,
+        1.0 - metrics['ndvi_sse_per_timestep'] / sst_per_timestep,
+        np.nan
+    )
+    
+    # Compute NDVI RMSE per landcover class
+    metrics['ndvi_rmse_per_landcover'] = np.sqrt(np.divide(
+        metrics['lc_ndvi_sse'],
+        metrics['lc_ndvi_count'],
+        out=np.zeros_like(metrics['lc_ndvi_sse']),
+        where=metrics['lc_ndvi_count'] > 0
+    ))
+    
+    # Compute NDVI NSE per landcover class
+    lc_count_safe = np.maximum(metrics['lc_ndvi_count'], 1)
+    lc_sst = (
+        metrics['lc_ndvi_sum_sq']
+        - (metrics['lc_ndvi_sum'] ** 2) / lc_count_safe
+    )
+    ratio = np.divide(
+        metrics['lc_ndvi_sse'], lc_sst,
+        out=np.full_like(lc_sst, np.nan),
+        where=lc_sst > 0
+    )
+    metrics['ndvi_nse_per_landcover'] = np.where(
+        lc_sst > 0,
+        1.0 - ratio,
+        np.nan
     )
     
     return metrics
@@ -629,6 +707,7 @@ def export_prediction_comparison(metrics, output_path):
     
     Generates separate images for each sample: output_path_1.png, output_path_2.png, etc.
     Randomly selects samples from available predictions.
+    Shows target reflectance (top) and predicted reflectance (bottom).
     """
     n_available = len(metrics['predictions'])
     n_samples = min(2, n_available)
@@ -645,8 +724,13 @@ def export_prediction_comparison(metrics, output_path):
     for i, sample_idx in enumerate(sample_indices):
         pred = metrics['predictions'][sample_idx]
         true = metrics['ground_truth'][sample_idx]
+        bap = metrics['bap_composites'][sample_idx]
         
-        # Create figure for this sample (2 rows: true and predicted)
+        # Reconstruct full reflectance
+        true_refl = bap + true
+        pred_refl = bap + pred
+        
+        # Create figure for this sample (2 rows: target and predicted reflectance)
         fig, axes = plt.subplots(
             2, n_timesteps, 
             figsize=(10, 3.5),
@@ -657,19 +741,19 @@ def export_prediction_comparison(metrics, output_path):
         timesteps = np.linspace(0, pred.shape[0] - 1, n_timesteps, dtype=int)
         
         for col, t in enumerate(timesteps):
-            # Ground truth
-            true_rgb = make_delta_rgb(true[t])
+            # Target reflectance (top row)
+            true_rgb = make_rgb(true_refl[t])
             axes[0, col].imshow(true_rgb)
             axes[0, col].set_xticks([])
             axes[0, col].set_yticks([])
-            axes[0, col].set_title(f't = {t}', fontsize=11, fontweight='bold', pad=8)
+            axes[0, col].set_title(f't = {(t + 1) * 5}', fontsize=11, fontweight='bold', pad=8)
             
             # Row label (first column only)
             if col == 0:
-                axes[0, col].set_ylabel('True', fontsize=10)
+                axes[0, col].set_ylabel('Target', fontsize=10)
             
-            # Prediction
-            pred_rgb = make_delta_rgb(pred[t])
+            # Predicted reflectance (bottom row)
+            pred_rgb = make_rgb(pred_refl[t])
             axes[1, col].imshow(pred_rgb)
             axes[1, col].set_xticks([])
             axes[1, col].set_yticks([])
@@ -678,7 +762,7 @@ def export_prediction_comparison(metrics, output_path):
             if col == 0:
                 axes[1, col].set_ylabel('Predicted', fontsize=10)
         
-        fig.suptitle(f'Sample {i + 1}: Prediction vs Ground Truth (Reflectance Deltas)', 
+        fig.suptitle(f'Sample {i + 1}: Prediction vs Ground Truth (Reflectance)', 
                      fontsize=14, fontweight='bold')
         # Use tight_layout with rect to leave space for suptitle
         fig.tight_layout(rect=[0, 0, 1, 0.92])
@@ -697,22 +781,133 @@ def export_temporal_error(metrics, output_path):
     mae_ts_band = metrics['mae_per_timestep_band']  # (n_timesteps, n_bands)
     
     n_timesteps = mae_ts_band.shape[0]
-    timesteps = np.arange(1, n_timesteps + 1)
+    days = np.arange(1, n_timesteps + 1) * 5  # 5-day intervals
     
     # Create stacked bar chart
     bottom = np.zeros(n_timesteps)
     for i, (band_name, band_color) in enumerate(zip(BAND_NAMES, BAND_COLORS)):
-        ax.bar(timesteps, mae_ts_band[:, i], bottom=bottom, label=band_name, 
-               color=band_color, edgecolor='white', linewidth=0.3)
+        ax.bar(days, mae_ts_band[:, i], bottom=bottom, label=band_name, 
+               color=band_color, edgecolor='white', linewidth=0.3, width=4)
         bottom += mae_ts_band[:, i]
     
-    ax.set_xlabel('Forecast Timestep (5-day intervals)')
+    ax.set_xlabel('Forecast Horizon (days)')
     ax.set_ylabel('Mean Absolute Error (Stacked)')
     ax.set_title('Prediction Error Over Forecast Horizon by Band', fontsize=14, fontweight='bold')
-    ax.set_xlim(0.5, n_timesteps + 0.5)
+    ax.set_xlim(0, max(days) + 5)
     ax.set_ylim(0, None)
     ax.grid(True, axis='y', alpha=0.3)
     ax.legend(loc='upper left', bbox_to_anchor=(1.02, 1), title='Spectral Band')
+    
+    plt.tight_layout()
+    plt.savefig(output_path)
+    plt.close()
+    print(f"Saved: {output_path}")
+
+
+def export_temporal_error_ndvi(metrics, output_path_rmse, output_path_nse=None):
+    """Create separate plots of NDVI RMSE and NSE over forecast horizon.
+    
+    This generates Figures for the Results chapter.
+    Plot 1: RMSE for NDVI (lower is better)
+    Plot 2: Nash-Sutcliffe Efficiency (higher is better, 1.0 is perfect)
+    """
+    rmse = metrics['ndvi_rmse_per_timestep']
+    n_timesteps = len(rmse)
+    timesteps = np.arange(1, n_timesteps + 1)
+    days = timesteps * 5  # 5-day intervals
+    
+    # --- Plot 1: RMSE ---
+    fig, ax = plt.subplots(figsize=(10, 6))
+    color_rmse = '#1f77b4'
+    ax.plot(days, rmse, 'o-', color=color_rmse, linewidth=2, markersize=6, label='RMSE (NDVI)')
+    ax.set_xlabel('Forecast Horizon (days)', fontsize=12)
+    ax.set_ylabel('Root Mean Square Error (NDVI)', fontsize=12)
+    ax.set_xlim(0, max(days) + 5)
+    ax.set_ylim(0, max(rmse) * 1.15)
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc='upper left')
+    ax.set_title('RMSE Evolution Over Forecast Horizon', fontsize=14, fontweight='bold')
+    
+    plt.tight_layout()
+    plt.savefig(output_path_rmse)
+    plt.close()
+    print(f"Saved: {output_path_rmse}")
+    
+    # --- Plot 2: NSE (if available) ---
+    nse = metrics.get('ndvi_nse_per_timestep', None)
+    if nse is not None and not np.all(np.isnan(nse)):
+        if output_path_nse is None:
+            # Derive NSE path from RMSE path
+            base, ext = os.path.splitext(output_path_rmse)
+            output_path_nse = f"{base}_nse{ext}"
+        
+        fig, ax = plt.subplots(figsize=(10, 6))
+        color_nse = '#ff7f0e'
+        ax.plot(days, nse, 's--', color=color_nse, linewidth=2, markersize=6, label='NSE')
+        ax.set_xlabel('Forecast Horizon (days)', fontsize=12)
+        ax.set_ylabel('Nash-Sutcliffe Efficiency', fontsize=12)
+        ax.set_xlim(0, max(days) + 5)
+        ax.axhline(0, color='gray', linestyle=':', linewidth=1, alpha=0.5)
+        ax.grid(True, alpha=0.3)
+        ax.legend(loc='lower left')
+        ax.set_title('NSE Evolution Over Forecast Horizon', fontsize=14, fontweight='bold')
+        
+        plt.tight_layout()
+        plt.savefig(output_path_nse)
+        plt.close()
+        print(f"Saved: {output_path_nse}")
+    else:
+        print("NSE data not available, skipping NSE plot.")
+
+
+def export_landcover_error(metrics, output_path):
+    """Create grouped bar chart of RMSE by landcover class.
+    
+    This generates Figure 4.2 for the Results chapter.
+    Shows NDVI RMSE for vegetated land cover classes.
+    """
+    fig, ax = plt.subplots(figsize=(12, 6))
+    
+    rmse_values = metrics.get('ndvi_rmse_per_landcover', metrics['mae_per_landcover'])
+    pixel_counts = metrics['lc_pixel_count']
+    
+    # Filter classes with enough pixels
+    total_pixels = pixel_counts.sum()
+    min_pixels = total_pixels * 0.001
+    
+    valid_indices = []
+    valid_names = []
+    valid_rmse = []
+    valid_colors = []
+    
+    for i in range(len(LANDCOVER_CLASSES)):
+        if pixel_counts[i] >= min_pixels and rmse_values[i] > 0:
+            valid_indices.append(i)
+            valid_names.append(LANDCOVER_CLASSES[i])
+            valid_rmse.append(rmse_values[i])
+            valid_colors.append(LANDCOVER_COLORS[i])
+    
+    if not valid_names:
+        print(f"Warning: No landcover classes with sufficient data for {output_path}")
+        plt.close()
+        return
+    
+    # Sort by RMSE descending
+    sorted_indices = np.argsort(valid_rmse)[::-1]
+    valid_names = [valid_names[i] for i in sorted_indices]
+    valid_rmse = [valid_rmse[i] for i in sorted_indices]
+    valid_colors = [valid_colors[i] for i in sorted_indices]
+    
+    x = np.arange(len(valid_names))
+    bars = ax.bar(x, valid_rmse, color=valid_colors, edgecolor='black', linewidth=0.5)
+    
+    ax.set_xlabel('Land Cover Class')
+    ax.set_ylabel('Root Mean Square Error (NDVI)')
+    ax.set_title('Prediction Error by Land Cover Class', fontsize=14, fontweight='bold')
+    ax.set_xticks(x)
+    ax.set_xticklabels(valid_names, rotation=45, ha='right')
+    ax.set_ylim(0, max(valid_rmse) * 1.15)
+    ax.grid(True, axis='y', alpha=0.3)
     
     plt.tight_layout()
     plt.savefig(output_path)
@@ -760,64 +955,57 @@ def compute_ndvi(nir, red):
 
 def export_ndvi_comparison(metrics, output_path):
     """Create NDVI comparison visualization with proper grid layout."""
-    n_samples = min(2, len(metrics['predictions']))
-    n_timesteps = 4
+    n_timesteps = 5
     
-    # Create figure with constrained layout for tight spacing
+    # Single sample, 2 rows (True, Predicted), n_timesteps columns
     fig, axes = plt.subplots(
-        n_samples * 2, n_timesteps, 
-        figsize=(10, 3.5 * n_samples),
+        2, n_timesteps, 
+        figsize=(2.2 * n_timesteps, 3.5),
         gridspec_kw={'wspace': 0.02, 'hspace': 0.02}
     )
     
     im = None  # Store for colorbar
     
-    for sample_idx in range(n_samples):
-        pred = metrics['predictions'][sample_idx]
-        true = metrics['ground_truth'][sample_idx]
-        bap = metrics['bap_composites'][sample_idx]
+    pred = metrics['predictions'][0]
+    true = metrics['ground_truth'][0]
+    bap = metrics['bap_composites'][0]
+    
+    # Reconstruct full reflectance
+    pred_refl = bap + pred
+    true_refl = bap + true
+    
+    # Compute NDVI (NIR = band 3, Red = band 2)
+    pred_ndvi = np.clip(compute_ndvi(pred_refl[:, :, :, 3], pred_refl[:, :, :, 2]), -1.0, 1.0)
+    true_ndvi = np.clip(compute_ndvi(true_refl[:, :, :, 3], true_refl[:, :, :, 2]), -1.0, 1.0)
+    
+    timesteps = np.linspace(0, pred.shape[0] - 1, n_timesteps, dtype=int)
+    
+    for col, t in enumerate(timesteps):
+        # Ground truth NDVI
+        im = axes[0, col].imshow(true_ndvi[t], cmap='RdYlGn', vmin=-0.2, vmax=0.8)
+        axes[0, col].set_xticks([])
+        axes[0, col].set_yticks([])
+        axes[0, col].set_title(f't = {(t + 1) * 5}', fontsize=11, fontweight='bold')
         
-        # Reconstruct full reflectance
-        pred_refl = bap + pred
-        true_refl = bap + true
+        # Row labels (first column only)
+        if col == 0:
+            axes[0, col].set_ylabel('True', fontsize=10)
         
-        # Compute NDVI (NIR = band 3, Red = band 2)
-        pred_ndvi = compute_ndvi(pred_refl[:, :, :, 3], pred_refl[:, :, :, 2])
-        true_ndvi = compute_ndvi(true_refl[:, :, :, 3], true_refl[:, :, :, 2])
+        # Predicted NDVI
+        axes[1, col].imshow(pred_ndvi[t], cmap='RdYlGn', vmin=-0.2, vmax=0.8)
+        axes[1, col].set_xticks([])
+        axes[1, col].set_yticks([])
         
-        timesteps = np.linspace(0, pred.shape[0] - 1, n_timesteps, dtype=int)
-        
-        for col, t in enumerate(timesteps):
-            row_true = sample_idx * 2
-            row_pred = sample_idx * 2 + 1
-            
-            # Ground truth NDVI
-            im = axes[row_true, col].imshow(true_ndvi[t], cmap='RdYlGn', vmin=-0.2, vmax=0.8)
-            axes[row_true, col].set_xticks([])
-            axes[row_true, col].set_yticks([])
-            
-            # Column labels (top row only)
-            if sample_idx == 0:
-                axes[row_true, col].set_title(f't = {t}', fontsize=11, fontweight='bold')
-            
-            # Row labels (first column only)
-            if col == 0:
-                axes[row_true, col].set_ylabel(f'Sample {sample_idx+1}\nTrue', fontsize=10)
-            
-            # Predicted NDVI
-            axes[row_pred, col].imshow(pred_ndvi[t], cmap='RdYlGn', vmin=-0.2, vmax=0.8)
-            axes[row_pred, col].set_xticks([])
-            axes[row_pred, col].set_yticks([])
-            
-            # Row labels for prediction rows
-            if col == 0:
-                axes[row_pred, col].set_ylabel('Predicted', fontsize=10)
+        # Row labels for prediction rows
+        if col == 0:
+            axes[1, col].set_ylabel('Predicted', fontsize=10)
     
     # Add single colorbar on the right side
     cbar = fig.colorbar(im, ax=axes, location='right', shrink=0.8, pad=0.02, aspect=30)
     cbar.set_label('NDVI', fontsize=11)
     
-    plt.suptitle('NDVI Comparison (True vs Predicted)', fontsize=14, fontweight='bold', y=0.98)
+    fig.suptitle('NDVI Comparison (True vs Predicted)', fontsize=14, fontweight='bold')
+    fig.tight_layout(rect=[0, 0, 0.92, 0.92])
     plt.savefig(output_path, bbox_inches='tight')
     plt.close()
     print(f"Saved: {output_path}")
@@ -839,7 +1027,6 @@ def export_mae_by_landcover(metrics, output_path):
     valid_names = []
     valid_mae = []
     valid_colors = []
-    valid_percentages = []
     
     for i in range(len(LANDCOVER_CLASSES)):
         if pixel_counts[i] >= min_pixels and mae_values[i] > 0:
@@ -847,7 +1034,6 @@ def export_mae_by_landcover(metrics, output_path):
             valid_names.append(LANDCOVER_CLASSES[i])
             valid_mae.append(mae_values[i])
             valid_colors.append(LANDCOVER_COLORS[i])
-            valid_percentages.append(pixel_counts[i] / total_pixels * 100)
     
     if not valid_names:
         print(f"Warning: No landcover classes with sufficient data for {output_path}")
@@ -859,32 +1045,17 @@ def export_mae_by_landcover(metrics, output_path):
     valid_names = [valid_names[i] for i in sorted_indices]
     valid_mae = [valid_mae[i] for i in sorted_indices]
     valid_colors = [valid_colors[i] for i in sorted_indices]
-    valid_percentages = [valid_percentages[i] for i in sorted_indices]
     
     x = np.arange(len(valid_names))
     bars = ax.bar(x, valid_mae, color=valid_colors, edgecolor='black', linewidth=0.5)
-    
-    # Add percentage labels on bars
-    for bar, pct in zip(bars, valid_percentages):
-        height = bar.get_height()
-        ax.annotate(f'{pct:.1f}%',
-                    xy=(bar.get_x() + bar.get_width() / 2, height),
-                    xytext=(0, 3),
-                    textcoords="offset points",
-                    ha='center', va='bottom', fontsize=9)
     
     ax.set_xlabel('Land Cover Class')
     ax.set_ylabel('Mean Absolute Error')
     ax.set_title('Prediction Error by Land Cover Class', fontsize=14, fontweight='bold')
     ax.set_xticks(x)
     ax.set_xticklabels(valid_names, rotation=45, ha='right')
-    ax.set_ylim(0, max(valid_mae) * 1.15)  # Add space for labels
+    ax.set_ylim(0, max(valid_mae) * 1.15)
     ax.grid(True, axis='y', alpha=0.3)
-    
-    # Add legend for bar meaning
-    ax.annotate('(% of pixels shown above bars)', 
-                xy=(0.98, 0.98), xycoords='axes fraction',
-                ha='right', va='top', fontsize=9, fontstyle='italic')
     
     plt.tight_layout()
     plt.savefig(output_path)
@@ -896,8 +1067,16 @@ def export_mae_by_landcover(metrics, output_path):
 # Main Export Function
 # =============================================================================
 
-def main(max_samples=200):
-    """Run all exports."""
+def main(max_samples=200, split='val_chopped', model=None, train_generator=None, val_generator=None):
+    """Run all exports.
+    
+    Args:
+        max_samples: Maximum samples to process per dataset.
+        split: Dataset split for results.
+        model: Pre-loaded model (optional, avoids redundant loading).
+        train_generator: Pre-loaded DatasetGenerator for training set (optional).
+        val_generator: Pre-loaded DatasetGenerator for validation set (optional).
+    """
     
     # Create output directories
     os.makedirs(MATERIAL_DIR, exist_ok=True)
@@ -914,11 +1093,17 @@ def main(max_samples=200):
     print("-" * 40)
     
     print("\nCollecting training set statistics...")
-    train_generator = DatasetGenerator(DATASET_PATH)
+    if train_generator is None:
+        train_generator = DatasetGenerator(DATASET_PATH)
     train_stats = collect_dataset_statistics(train_generator, max_samples)
     
-    print("\nCollecting validation set statistics...")
-    val_generator = DatasetGenerator(VALIDATION_PATH)
+    print(f"\nCollecting validation set statistics (using {split})...")
+    if val_generator is None:
+        if split in ['val_chopped', 'val']:
+            val_path = VALIDATION_PATH
+        else:
+            val_path = DATASET_PATH
+        val_generator = DatasetGenerator(val_path)
     val_stats = collect_dataset_statistics(val_generator, max_samples)
     
     print("\nExporting materials figures...")
@@ -972,20 +1157,22 @@ def main(max_samples=200):
     
     # Load model
     model_path = os.path.join(CHECKPOINTS_DIR, "final_model.keras")
-    print(f"\nLoading model from {model_path}...")
     
-    if not os.path.exists(model_path):
-        print(f"ERROR: Model not found at {model_path}")
-        print("Skipping results exports.")
-        return
-    
-    try:
-        model = load_model(model_path, compile=False)
-        print("Model loaded successfully.")
-    except Exception as e:
-        print(f"ERROR: Failed to load model: {e}")
-        print("Skipping results exports.")
-        return
+    if model is None:
+        print(f"\nLoading model from {model_path}...")
+        if not os.path.exists(model_path):
+            print(f"ERROR: Model not found at {model_path}")
+            print("Skipping results exports.")
+            return
+        try:
+            model = load_model(model_path, compile=False)
+            print("Model loaded successfully.")
+        except Exception as e:
+            print(f"ERROR: Failed to load model: {e}")
+            print("Skipping results exports.")
+            return
+    else:
+        print("Using pre-loaded model.")
     
     print("\nCollecting prediction metrics on validation set...")
     val_metrics = collect_prediction_metrics(model, val_generator, max_samples)
@@ -1008,6 +1195,23 @@ def main(max_samples=200):
     export_temporal_error(
         val_metrics,
         os.path.join(RESULTS_DIR, "temporal_error.png")
+    )
+    
+    # Create error_analysis subdirectory for Chapter 4 specific figures
+    error_analysis_dir = os.path.join(RESULTS_DIR, "error_analysis")
+    os.makedirs(error_analysis_dir, exist_ok=True)
+    
+    # NDVI temporal error (Figure 4.1)
+    export_temporal_error_ndvi(
+        val_metrics,
+        os.path.join(error_analysis_dir, "temporal_error_rmse.png"),
+        os.path.join(error_analysis_dir, "temporal_error_nse.png")
+    )
+    
+    # Landcover error (Figure 4.2)
+    export_landcover_error(
+        val_metrics,
+        os.path.join(error_analysis_dir, "landcover_error.png")
     )
     
     # Spatial error heatmap
@@ -1040,9 +1244,15 @@ if __name__ == "__main__":
     parser.add_argument(
         "--max_samples",
         type=int,
-        default=200,
+        default=1500,
         help="Maximum samples to process per dataset (default: 50)"
+    )
+    parser.add_argument(
+        "--split",
+        type=str,
+        default="val_chopped",
+        help="Dataset split for results (val_chopped/train/val)"
     )
     args = parser.parse_args()
     
-    main(max_samples=args.max_samples)
+    main(max_samples=args.max_samples, split=args.split)

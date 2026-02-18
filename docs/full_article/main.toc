@@ -18,54 +18,51 @@
 \contentsline {section}{\numberline {2.4}Research Gaps and Opportunities}{14}{section.2.4}%
 \contentsline {subsection}{\numberline {2.4.1}Trajectory vs. Step-by-Step Prediction}{14}{subsection.2.4.1}%
 \contentsline {subsection}{\numberline {2.4.2}Regression-Focused Architectures}{14}{subsection.2.4.2}%
-\contentsline {subsection}{\numberline {2.4.3}Efficiency-Accuracy Trade-offs}{14}{subsection.2.4.3}%
+\contentsline {subsection}{\numberline {2.4.3}Efficiency-Accuracy Trade-offs}{15}{subsection.2.4.3}%
 \contentsline {section}{\numberline {2.5}Summary}{15}{section.2.5}%
 \contentsline {chapter}{\numberline {3}Materials and Methods}{16}{chapter.3}%
-\contentsline {section}{\numberline {3.1}Dataset: GreenEarthNet}{16}{section.3.1}%
-\contentsline {subsection}{\numberline {3.1.1}Data Sources}{16}{subsection.3.1.1}%
-\contentsline {subsubsection}{Sentinel-2 Multispectral Imagery}{16}{section*.4}%
-\contentsline {subsubsection}{E-OBS Climate Variables}{17}{section*.6}%
-\contentsline {subsubsection}{ESA WorldCover Land Classification}{17}{section*.8}%
+\contentsline {section}{\numberline {3.1}Dataset: GreenEarthNet}{17}{section.3.1}%
+\contentsline {subsection}{\numberline {3.1.1}Data Sources}{17}{subsection.3.1.1}%
+\contentsline {subsubsection}{Sentinel-2 Multispectral Imagery}{17}{section*.5}%
+\contentsline {subsubsection}{E-OBS Climate Variables}{17}{section*.7}%
+\contentsline {subsubsection}{ESA WorldCover Land Classification}{18}{section*.9}%
 \contentsline {subsection}{\numberline {3.1.2}Temporal Structure}{18}{subsection.3.1.2}%
 \contentsline {subsection}{\numberline {3.1.3}Dataset Splits}{18}{subsection.3.1.3}%
-\contentsline {section}{\numberline {3.2}Data Preprocessing Pipeline}{18}{section.3.2}%
-\contentsline {subsection}{\numberline {3.2.1}Cloud Masking and NaN Handling}{18}{subsection.3.2.1}%
+\contentsline {section}{\numberline {3.2}Data Preprocessing Pipeline}{19}{section.3.2}%
+\contentsline {subsection}{\numberline {3.2.1}Cloud Masking and NaN Handling}{19}{subsection.3.2.1}%
 \contentsline {subsection}{\numberline {3.2.2}Best Available Pixel (BAP) Compositing}{19}{subsection.3.2.2}%
-\contentsline {subsection}{\numberline {3.2.3}Weather Feature Engineering}{19}{subsection.3.2.3}%
-\contentsline {subsection}{\numberline {3.2.4}Temporal Metadata}{20}{subsection.3.2.4}%
-\contentsline {section}{\numberline {3.3}Model Architecture}{20}{section.3.3}%
-\contentsline {subsection}{\numberline {3.3.1}Architecture Overview}{20}{subsection.3.3.1}%
-\contentsline {subsection}{\numberline {3.3.2}Latent Space Encoder}{21}{subsection.3.3.2}%
-\contentsline {subsubsection}{Input Concatenation}{21}{section*.11}%
-\contentsline {subsubsection}{Cloud-Aware Gating Layer}{21}{section*.12}%
-\contentsline {subsubsection}{ConvLSTM Stack}{21}{section*.13}%
-\contentsline {subsection}{\numberline {3.3.3}Regression Parameter Head}{21}{subsection.3.3.3}%
-\contentsline {subsection}{\numberline {3.3.4}Weather-Time Adjustment MLP}{22}{subsection.3.3.4}%
-\contentsline {subsection}{\numberline {3.3.5}Growth Curve Layer}{22}{subsection.3.3.5}%
-\contentsline {subsection}{\numberline {3.3.6}Spatial Smoothing Layer}{23}{subsection.3.3.6}%
-\contentsline {section}{\numberline {3.4}Loss Function: ImprovedkNDVILoss}{23}{section.3.4}%
-\contentsline {subsection}{\numberline {3.4.1}Masked Huber Regression Loss}{23}{subsection.3.4.1}%
-\contentsline {subsection}{\numberline {3.4.2}Variance Penalty}{23}{subsection.3.4.2}%
-\contentsline {subsection}{\numberline {3.4.3}kNDVI Loss}{24}{subsection.3.4.3}%
-\contentsline {subsection}{\numberline {3.4.4}Combined Loss}{24}{subsection.3.4.4}%
-\contentsline {section}{\numberline {3.5}Training Configuration}{25}{section.3.5}%
-\contentsline {subsection}{\numberline {3.5.1}Optimization}{25}{subsection.3.5.1}%
-\contentsline {subsection}{\numberline {3.5.2}Model Size}{25}{subsection.3.5.2}%
-\contentsline {subsection}{\numberline {3.5.3}Hardware}{25}{subsection.3.5.3}%
-\contentsline {chapter}{\numberline {4}Results}{26}{chapter.4}%
-\contentsline {section}{\numberline {4.1}Error Metrics}{26}{section.4.1}%
-\contentsline {subsection}{\numberline {4.1.1}Per-Band Performance}{26}{subsection.4.1.1}%
-\contentsline {subsection}{\numberline {4.1.2}Benchmark Performance (Vegetation Score)}{27}{subsection.4.1.2}%
-\contentsline {section}{\numberline {4.2}Temporal Error Analysis}{28}{section.4.2}%
-\contentsline {subsection}{\numberline {4.2.1}Error Evolution Over Forecast Horizon}{28}{subsection.4.2.1}%
-\contentsline {section}{\numberline {4.3}Spatial Error Analysis}{29}{section.4.3}%
-\contentsline {subsection}{\numberline {4.3.1}Error Heatmap}{29}{subsection.4.3.1}%
-\contentsline {subsection}{\numberline {4.3.2}Land Cover Class Performance}{30}{subsection.4.3.2}%
-\contentsline {section}{\numberline {4.4}Prediction Visualization}{30}{section.4.4}%
-\contentsline {subsection}{\numberline {4.4.1}Ground Truth vs. Prediction Comparison}{30}{subsection.4.4.1}%
-\contentsline {section}{\numberline {4.5}Model Comparison}{31}{section.4.5}%
-\contentsline {section}{\numberline {4.6}Interpretability Analysis}{32}{section.4.6}%
-\contentsline {subsection}{\numberline {4.6.1}Feature Importance Analysis}{32}{subsection.4.6.1}%
-\contentsline {subsection}{\numberline {4.6.2}Decision Rules Extraction}{33}{subsection.4.6.2}%
-\contentsline {subsection}{\numberline {4.6.3}Extreme Event Analysis (Heatwaves)}{33}{subsection.4.6.3}%
-\contentsline {section}{\numberline {4.7}Summary}{34}{section.4.7}%
+\contentsline {subsection}{\numberline {3.2.3}Weather Feature Engineering}{20}{subsection.3.2.3}%
+\contentsline {subsection}{\numberline {3.2.4}Temporal Metadata}{21}{subsection.3.2.4}%
+\contentsline {subsection}{\numberline {3.2.5}Weather-Time Adjustment Mechanism}{21}{subsection.3.2.5}%
+\contentsline {section}{\numberline {3.3}Model Architecture}{22}{section.3.3}%
+\contentsline {subsection}{\numberline {3.3.1}Architecture Overview}{22}{subsection.3.3.1}%
+\contentsline {subsection}{\numberline {3.3.2}Latent Space Encoder}{22}{subsection.3.3.2}%
+\contentsline {subsubsection}{Input Concatenation}{23}{section*.12}%
+\contentsline {subsubsection}{Cloud-Aware Gating Layer}{23}{section*.13}%
+\contentsline {subsubsection}{ConvLSTM Stack}{23}{section*.14}%
+\contentsline {subsection}{\numberline {3.3.3}Regression Parameter Head}{23}{subsection.3.3.3}%
+\contentsline {subsection}{\numberline {3.3.4}Weather-Time Adjustment MLP}{24}{subsection.3.3.4}%
+\contentsline {subsection}{\numberline {3.3.5}Growth Curve Layer}{24}{subsection.3.3.5}%
+\contentsline {subsection}{\numberline {3.3.6}Spatial Smoothing Layer}{25}{subsection.3.3.6}%
+\contentsline {section}{\numberline {3.4}Loss Function}{25}{section.3.4}%
+\contentsline {subsection}{\numberline {3.4.1}Masked Huber Regression Loss}{25}{subsection.3.4.1}%
+\contentsline {subsection}{\numberline {3.4.2}Variance Penalty}{25}{subsection.3.4.2}%
+\contentsline {subsection}{\numberline {3.4.3}kNDVI Loss}{25}{subsection.3.4.3}%
+\contentsline {subsection}{\numberline {3.4.4}Combined Loss}{26}{subsection.3.4.4}%
+\contentsline {section}{\numberline {3.5}Training Configuration}{26}{section.3.5}%
+\contentsline {subsection}{\numberline {3.5.1}Optimization}{26}{subsection.3.5.1}%
+\contentsline {subsection}{\numberline {3.5.2}Model Size}{27}{subsection.3.5.2}%
+\contentsline {subsection}{\numberline {3.5.3}Hardware}{27}{subsection.3.5.3}%
+\contentsline {chapter}{\numberline {4}Results}{28}{chapter.4}%
+\contentsline {section}{\numberline {4.1}Error Analysis}{28}{section.4.1}%
+\contentsline {subsection}{\numberline {4.1.1}Per-Band Error Metrics}{28}{subsection.4.1.1}%
+\contentsline {subsection}{\numberline {4.1.2}Error by Prediction Step}{29}{subsection.4.1.2}%
+\contentsline {subsection}{\numberline {4.1.3}Error by Land Cover Class}{31}{subsection.4.1.3}%
+\contentsline {section}{\numberline {4.2}Comparison with Contextformer}{32}{section.4.2}%
+\contentsline {subsection}{\numberline {4.2.1}Nash-Sutcliffe Efficiency}{32}{subsection.4.2.1}%
+\contentsline {subsection}{\numberline {4.2.2}Efficiency Analysis}{33}{subsection.4.2.2}%
+\contentsline {section}{\numberline {4.3}Interpretability Analysis}{33}{section.4.3}%
+\contentsline {subsection}{\numberline {4.3.1}Growth Curve Parameter Interpretation}{33}{subsection.4.3.1}%
+\contentsline {subsection}{\numberline {4.3.2}NIR vs. Red Band Dynamics}{34}{subsection.4.3.2}%
+\contentsline {subsection}{\numberline {4.3.3}Regional Vegetation Dynamics}{34}{subsection.4.3.3}%
+\contentsline {section}{\numberline {4.4}Summary}{35}{section.4.4}%

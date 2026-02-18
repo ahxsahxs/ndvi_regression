@@ -39,7 +39,7 @@ def scale_to_01(data: np.ndarray) -> np.ndarray:
 
 class DatasetGenerator:
     S2_BANDS = ['s2_B02', 's2_B03', 's2_B04', 's2_B8A']
-    S2_MASK = 's2_mask'
+    S2_MASK_CANDIDATES = ['s2_mask', 's2_dlmask']
     S2_AVAIL = 's2_avail'
     ESA_CLASSES = np.array([10, 20, 30, 40, 50, 60, 70, 80, 90, 95, 100])
     # E-OBS weather variables (excluding eobs_fg which contains NaN)
@@ -81,6 +81,28 @@ class DatasetGenerator:
         self.input_days = input_days
         self.target_days = target_days
 
+    def _resolve_mask_var(self, dataset: xr.Dataset) -> str:
+        """
+        Resolves the mask variable name from the dataset.
+
+        Different dataset versions may use different variable names for the
+        cloud mask (e.g., 's2_mask' or 's2_dlmask'). This method checks
+        which one is available.
+
+        :param dataset: xarray Dataset to check.
+        :type dataset: xr.Dataset
+        :return: The name of the mask variable found in the dataset.
+        :rtype: str
+        :raises KeyError: If no known mask variable is found.
+        """
+        for candidate in self.S2_MASK_CANDIDATES:
+            if candidate in dataset.data_vars:
+                return candidate
+        raise KeyError(
+            f"No mask variable found. Expected one of {self.S2_MASK_CANDIDATES}, "
+            f"but dataset contains: {list(dataset.data_vars)}"
+        )
+
     def prepare_sentinel_for_slice(
             self, dataset: xr.Dataset, time_slice: slice
         ) -> tuple[np.ndarray, np.ndarray]:
@@ -105,7 +127,8 @@ class DatasetGenerator:
         s2_nans = np.isnan(sentinel2).any(axis=-1, keepdims=True)
 
         # Cloud mask: mask > 0 means cloud/shadow
-        mask = dataset[self.S2_MASK].isel(time=time_slice).values
+        mask_var = self._resolve_mask_var(dataset)
+        mask = dataset[mask_var].isel(time=time_slice).values
         s2_mask = (mask > 0).astype(np.float32)
         s2_mask = np.expand_dims(s2_mask, axis=-1)
 

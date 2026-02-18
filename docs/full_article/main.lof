@@ -2,12 +2,9 @@
 \addvspace {10\p@ }
 \addvspace {10\p@ }
 \addvspace {10\p@ }
-\contentsline {figure}{\numberline {3.1}{\ignorespaces Model architecture overview showing the encoder-decoder structure with growth curve parameterization.\relax }}{20}{figure.caption.10}%
+\contentsline {figure}{\numberline {3.1}{\ignorespaces Model architecture overview showing the encoder-decoder structure with growth curve parameterization.\relax }}{22}{figure.caption.11}%
 \addvspace {10\p@ }
-\contentsline {figure}{\numberline {4.1}{\ignorespaces Vegetation Score comparison between the proposed Growth Curve Model and a Persistence Baseline across different land cover types. Higher scores indicate better performance (1.0 is perfect prediction).\relax }}{27}{figure.caption.18}%
-\contentsline {figure}{\numberline {4.2}{\ignorespaces Prediction error evolution over the 100-day forecast horizon (20 steps). The plot shows the Root Mean Square Error (RMSE) and Nash-Sutcliffe Efficiency (NSE) for kNDVI.\relax }}{28}{figure.caption.19}%
-\contentsline {figure}{\numberline {4.3}{\ignorespaces Spatial distribution of mean absolute error, averaged across samples and forecast timesteps.\relax }}{29}{figure.caption.20}%
-\contentsline {figure}{\numberline {4.4}{\ignorespaces Sample 1: Ground truth (top row) vs. predicted (bottom row) reflectance deltas across forecast timesteps. RGB visualization maps delta values to color channels.\relax }}{30}{figure.caption.21}%
-\contentsline {figure}{\numberline {4.5}{\ignorespaces Sample 2: Ground truth (top row) vs. predicted (bottom row) reflectance deltas across forecast timesteps.\relax }}{31}{figure.caption.22}%
-\contentsline {figure}{\numberline {4.6}{\ignorespaces Permutation Feature Importance for kNDVI prediction. Top predictors include temporal features (Cosine of DOY, Step Index) and Radiation.\relax }}{33}{figure.caption.24}%
-\contentsline {figure}{\numberline {4.7}{\ignorespaces Distribution of predicted kNDVI changes (Delta) during Heatwave vs. Normal conditions.\relax }}{34}{figure.caption.25}%
+\contentsline {figure}{\numberline {4.1}{\ignorespaces kNDVI RMSE evolution over the 100-day forecast horizon (20 steps at 5-day intervals). Lower values indicate better prediction accuracy.\relax }}{29}{figure.caption.19}%
+\contentsline {figure}{\numberline {4.2}{\ignorespaces Nash-Sutcliffe Efficiency evolution over the 100-day forecast horizon. Higher values indicate better predictive skill (1.0 is perfect, 0.0 equals predicting the mean).\relax }}{30}{figure.caption.20}%
+\contentsline {figure}{\numberline {4.3}{\ignorespaces Prediction error by ESA WorldCover land cover class. Vegetated classes (Tree cover, Shrubland, Grassland) show varying prediction difficulty based on their phenological complexity.\relax }}{31}{figure.caption.21}%
+\contentsline {figure}{\numberline {4.4}{\ignorespaces Spatial distribution of growth curve parameters for a sample validation scene. Top row: Amplitude ($A$) for NIR and Red bands. Bottom row: Rate ($\lambda $) and Offset ($B$). Vegetated areas show distinct parameter patterns corresponding to their phenological state.\relax }}{34}{figure.caption.24}%

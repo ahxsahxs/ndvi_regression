@@ -6,6 +6,19 @@
 
 This chapter describes the dataset, preprocessing pipeline, model architecture, loss function design, and training configuration used in this work. The methodology builds upon the GreenEarthNet benchmark \citep{benson2024multimodal} while introducing a novel growth curve trajectory learning approach.
 
+\subsection*{Delta Prediction Strategy}
+
+A key design decision in this work, inspired by \citet{pellicer2024explainable}, is to formulate the forecasting task as \textbf{delta prediction} rather than direct reflectance reconstruction. Reconstructing complete reflectance maps for each future timestep would be computationally expensive and would require the model to learn both the static spatial structure of each scene and its temporal dynamics simultaneously.
+
+Instead, the model predicts only the \textit{difference} (delta) between the last available image in the input sequence $X$ and each target image in the output sequence $Y$:
+\begin{equation}
+    \delta_t = Y_t - X_{\text{last}}, \quad t \in \{1, \ldots, T_{\text{forecast}}\}
+\end{equation}
+
+This delta prediction formulation offers several advantages. First, reflectance deltas are typically small (in the range $[-0.2, 0.2]$), reducing the dynamic range and making the regression task more tractable than predicting absolute reflectance values. Second, the model can focus on learning vegetation change patterns rather than reconstructing static scene features that remain constant throughout the sequence. Third, the smaller output ranges and simpler targets enable faster convergence with fewer parameters, improving computational efficiency.
+
+The Best Available Pixel (BAP) compositing procedure, described in Section~\ref{sec:bap}, specifies how the reference image $X_{\text{last}}$ is constructed to handle cloudy pixels in the input sequence.
+
 \section{Dataset: GreenEarthNet}
 
 The GreenEarthNet dataset provides a standardized benchmark for multi-modal vegetation forecasting, containing aligned satellite imagery, meteorological data, and land cover classification for sites across Europe.
@@ -110,10 +123,11 @@ Raw observations require preprocessing to handle missing data, cloud contaminati
 Sentinel-2 observations include a cloud mask derived from the Sen2Cor processor. Cloud-contaminated pixels are marked as invalid along with pixels containing NaN values (sensor errors, missing data). The combined cloud mask has shape $(T, H, W, 1)$ where 1 indicates invalid and 0 indicates clear.
 
 \subsection{Best Available Pixel (BAP) Compositing}
+\label{sec:bap}
 
-### TODO: I need to explain what is delta prediction before I can explain BAP.
+As described in the chapter introduction, delta prediction requires a consistent reference image $X_{\text{last}}$ representing the state of the scene at the end of the input period. However, satellite observations are frequently contaminated by clouds, meaning the raw last frame may contain invalid pixels. To address this, a Best Available Pixel (BAP) composite is computed as the reference image.
 
-To provide a consistent reference for delta prediction, a Best Available Pixel (BAP) composite is computed. For each pixel location, the algorithm iterates backwards through the temporal sequence to find the most recent clear (non-cloudy) observation:
+For each pixel location, the BAP algorithm iterates backwards through the temporal sequence to find the most recent clear (non-cloudy) observation:
 
 \begin{algorithm}[H]
     \caption{Best Available Pixel Compositing}
@@ -133,33 +147,29 @@ The model predicts reflectance deltas relative to the BAP composite rather than 
 
 \subsection{Weather Feature Engineering}
 
+Following the methodology established by \citet{pellicer2024explainable}, raw meteorological variables require transformation to capture both climatological trends and instantaneous anomalies. This separation is critical for remote sensing applications: climatological patterns capture the expected seasonal vegetation behavior (e.g., spring green-up, summer senescence), while anomalies capture deviations caused by extreme events such as droughts or heatwaves.
 
-### TODO: This methodology is the same as in the pellicer paper. I should reference it and just explain it briefly.
+A climatology-based detrending approach is applied to each of the 7 E-OBS variables. A 21-day rolling mean is computed as the climatology baseline, and anomalies are calculated as deviations from this baseline: $\text{anomaly} = \text{value} - \text{climatology}$. For each 5-day forecast step, three aggregations are extracted: (1) \texttt{min\_detrend}, the minimum anomaly normalized to $[-1, 1]$, capturing extreme negative deviations; (2) \texttt{max\_detrend}, the maximum anomaly normalized to $[-1, 1]$, capturing extreme positive deviations; and (3) \texttt{mean\_clima}, the mean climatology normalized to $[0, 1]$, representing expected seasonal conditions.
 
-Raw meteorological variables require transformation to capture both absolute values and anomalies. A climatology-based detrending approach is applied:
-
-\begin{enumerate}
-    \item Compute 21-day rolling mean as climatology baseline
-    \item Calculate anomalies as deviation from climatology: $\text{anomaly} = \text{value} - \text{climatology}$
-    \item For each 5-day forecast step, extract three aggregations:
-    \begin{itemize}
-        \item \texttt{min\_detrend}: Minimum anomaly (normalized to $[-1, 1]$)
-        \item \texttt{max\_detrend}: Maximum anomaly (normalized to $[-1, 1]$)
-        \item \texttt{mean\_clima}: Mean climatology (normalized to $[0, 1]$)
-    \end{itemize}
-\end{enumerate}
-
-This yields a weather feature tensor of shape $(20, 21)$ representing 7 variables $\times$ 3 aggregations for each of the 20 target timesteps.
+This yields a weather feature tensor of shape $(20, 21)$ representing 7 variables $\times$ 3 aggregations for each of the 20 target timesteps. The resulting representation allows the model to distinguish between normal seasonal dynamics (driven by climatology) and anomalous conditions (driven by instantaneous detrended values), enabling more robust predictions under both typical and extreme weather conditions.
 
 \subsection{Temporal Metadata}
 
-### TODO: Explain why the temporal metadata is being added and how it can be used to track phenological features. Be more verbose and explicit in the day of the year cyclic encoding.
+Vegetation dynamics exhibit strong phenological patterns driven by seasonal cycles. To capture these patterns, temporal context is encoded through a compact 3-dimensional feature vector that provides the model with information about the observation's position within both the annual cycle and the multi-year dataset span.
 
-Temporal context is encoded through three features:
-\begin{itemize}
-    \item Year normalization: $(\text{year} - 2017) / 4$ for the 2017--2021 range
-    \item Cyclic day-of-year encoding: $\sin(2\pi \cdot \text{doy} / \text{days\_in\_year})$ and $\cos(2\pi \cdot \text{doy} / \text{days\_in\_year})$
-\end{itemize}
+The first feature is a year normalization computed as $(\text{year} - 2017) / 4$ for the 2017--2021 range, allowing the model to account for inter-annual trends or long-term changes in vegetation patterns. The remaining two features encode the day-of-year (DOY) using cyclical sine and cosine transformations:
+\begin{equation}
+    \text{doy}_{\sin} = \sin\left(\frac{2\pi \cdot \text{doy}}{\text{days\_in\_year}}\right), \quad
+    \text{doy}_{\cos} = \cos\left(\frac{2\pi \cdot \text{doy}}{\text{days\_in\_year}}\right)
+\end{equation}
+
+This cyclical encoding is essential for capturing phenological information. Unlike linear DOY representations, the sine-cosine encoding ensures that December 31st and January 1st are represented as adjacent points in feature space, reflecting the continuous nature of seasonal cycles. The model can thus learn that similar phenological stages occur at similar positions in the annual cycle, enabling generalization across years for events such as spring green-up (approximately DOY 80--120 in temperate regions) or autumn senescence (approximately DOY 250--300).
+
+\subsection{Weather-Time Adjustment Mechanism}
+
+The temporal metadata and weather features are not used directly in the image reconstruction but instead modulate the growth curve dynamics through a dedicated Weather-Time Adjustment MLP. This multi-layer perceptron takes the 3-dimensional temporal metadata and the $(20, 21)$ weather sequence as inputs and produces per-timestep adjustment factors $\text{adj}(t) \in [0.5, 1.5]$ for each of the 20 forecast steps.
+
+These adjustment factors multiplicatively modulate the effective time in the growth curve equation (Equation~\ref{eq:growth_curve}), allowing weather conditions to accelerate or decelerate vegetation growth dynamics. For example, favorable conditions (high temperature and moisture during the growing season) may produce adjustment factors $> 1.0$, accelerating growth, while stress conditions (drought, extreme heat) may produce factors $< 1.0$, slowing growth or inducing earlier senescence. This mechanism provides interpretable weather-vegetation coupling while maintaining the parametric growth curve structure.
 
 \section{Model Architecture}
 
@@ -247,13 +257,13 @@ where:
     \item $\text{adj}(t)$ is the weather-time adjustment factor
 \end{itemize}
 
-This formulation represents a saturation growth curve with weather-modulated rate. Unlike the approach of \citet{pellicer2024explainable} which predicts next-step kNDVI values, our method directly generates predictions for all 20 timesteps in a single forward pass, enabling efficient long-horizon forecasting without error accumulation.
+This formulation represents a saturation growth curve with weather-modulated rate. Unlike the approach of \citet{pellicer2024explainable} which predicts next-step $\delta$ values, our method directly generates predictions for all 20 timesteps in a single forward pass, enabling efficient long-horizon forecasting without error accumulation.
 
 \subsection{Spatial Smoothing Layer}
 
 A final spatial smoothing layer applies learned depthwise separable convolution to prevent sharp discontinuities in the predicted delta maps. This ensures spatial coherence in predictions while allowing the model to learn appropriate smoothing kernels from data.
 
-\section{Loss Function: ImprovedkNDVILoss}
+\section{Loss Function}
 
 The loss function combines regression accuracy with variance preservation and spectral consistency through three components.
 
@@ -272,7 +282,7 @@ The Huber loss with $\delta=0.1$ provides robustness to outliers while maintaini
 To prevent mode collapse where the model predicts constant values across spatial locations, a variance penalty encourages matching the spatial variance of predictions to ground truth:
 
 \begin{equation}
-    \mathcal{L}_{\text{var}} = |\text{Var}_{\text{spatial}}(\delta_{\text{true}}) - \text{Var}_{\text{spatial}}(\delta_{\text{pred}})|
+    \mathcal{L}_{\text{var}} = |\text{Var}(\delta_{\text{true}}) - \text{Var}(\delta_{\text{pred}})|
 \end{equation}
 
 
@@ -287,7 +297,7 @@ The kernel NDVI (kNDVI) loss provides spectral consistency by ensuring predictio
     \text{kNDVI} = \frac{1 - k(n, r)}{1 + k(n, r)}
 \end{equation}
 \begin{equation}
-    \mathcal{L}_{\text{kndvi}} = \min(|\text{kNDVI}_{\text{true}} - \text{kNDVI}_{\text{pred}}|, 0.5) \times 0.1
+    \mathcal{L}_{\text{kndvi}} = \min(|\text{kNDVI}_{\text{true}} - \text{kNDVI}_{\text{pred}}|, 0.5)
 \end{equation}
 
 where $n$ and $r$ are NIR and Red reflectance values respectively, and $\sigma=1$ is the RBF kernel parameter. The kNDVI formulation \citep{camps2021unified} provides a more robust vegetation index than traditional NDVI.

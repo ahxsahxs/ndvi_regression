@@ -1,0 +1,6 @@
+\beamer@sectionintoc {1}{Recap}{3}{0}{1}
+\beamer@sectionintoc {2}{Dataset Characteristics}{4}{0}{2}
+\beamer@sectionintoc {3}{Model Results}{5}{0}{3}
+\beamer@sectionintoc {4}{Vegetation Score Analysis}{10}{0}{4}
+\beamer@sectionintoc {5}{Root Cause Diagnosis}{11}{0}{5}
+\beamer@sectionintoc {6}{Next Steps (March 2026)}{13}{0}{6}

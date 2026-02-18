@@ -20,7 +20,7 @@ os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
 
 from dataset import DatasetGenerator
 from build_model import load_model, build_eo_convlstm_model
-from config import VALIDATION_PATH
+from config import DATASET_PATH, VALIDATION_PATH
 
 # =============================================================================
 # Constants
@@ -33,8 +33,9 @@ LANDCOVER_CLASSES = [
 ]
 VEGETATION_CLASSES = ['Tree cover', 'Shrubland', 'Grassland']
 
-OUTPUT_DIR = "images/results/error_analysis"
-os.makedirs(OUTPUT_DIR, exist_ok=True)
+# Default output directory - can be overridden via CLI
+DEFAULT_OUTPUT_DIR = "images/results/error_analysis"
+OUTPUT_DIR = DEFAULT_OUTPUT_DIR
 
 plt.rcParams.update({
     'font.family': 'serif',
@@ -48,12 +49,10 @@ plt.rcParams.update({
 # Helper Functions
 # =============================================================================
 
-def compute_kndvi(nir, red, sigma=0.5):
-    """Compute kernel NDVI using RBF kernel."""
-    diff_sq = (nir - red) ** 2
-    k = np.exp(-diff_sq / (2 * sigma ** 2))
-    kndvi = (1 - k) / (1 + k + 1e-8)
-    return kndvi
+def compute_ndvi(nir, red):
+    """Compute standard NDVI = (NIR - Red) / (NIR + Red).
+    Matches the official EarthNet benchmark protocol."""
+    return (nir - red) / (nir + red + 1e-8)
 
 def adapt_inputs(x, y):
     """Transform dataset inputs."""
@@ -83,70 +82,97 @@ class PersistenceModel:
 # Analysis Logic
 # =============================================================================
 
-def calculate_vegetation_score_stats(true_kndvi, pred_kndvi, mask, landcover_flat):
+def calculate_vegetation_score_stats(true_ndvi, pred_ndvi, mask, landcover_flat):
     """
     Compute pixel-wise NSE and aggregate for Vegetation Score.
     
-    Formula:
-    1. nse = NSE(true, pred) at cloud-free pixels
-    2. nnse = 1 / (2 - nse) -> Range [0, 1]
-    3. veg_score = 2 - 1/mean(nnse) -> Range [-Inf, 1]
-       Computed over Vegetation Pixels (Trees, Shrubland, Grassland).
+    Matches the official EarthNet benchmark protocol (score_v2.normalized_NSE):
+    1. NSE per pixel across time (cloud-free timesteps only)
+    2. nNSE = 1 / (2 - NSE)  ->  Range [0, 1]
+    3. VegScore = 2 - 1/mean(nNSE)  ->  Range [-Inf, 1]
+    
+    Zero-variance pixels (SST=0) produce NaN via 0/0 division,
+    which are excluded from aggregation via nanmean (matching
+    the official xarray/pandas NaN-skipping behavior).
     
     Returns:
-        dict of stats per landcover
+        dict of nNSE arrays per landcover class
     """
-    T, N = true_kndvi.shape
+    T, N = true_ndvi.shape
     
-    # Store NNSE values per landcover to limit memory usage
     lc_nnse = {lc: [] for lc in LANDCOVER_CLASSES}
     
-    # Vectorized NSE per pixel
-    # Numerator: sum((obs - pred)^2)
-    diff_sq = (true_kndvi - pred_kndvi) ** 2
-    # Mask invalid (cloudy)
-    valid = (mask == 0)
+    # Mask invalid (cloudy) timesteps
+    valid = (mask == 0).astype(np.float32)
     
-    # If a pixel is never valid, we skip it
-    valid_counts = np.sum(valid, axis=0) # (N,)
-    valid_pixels_mask = valid_counts > 2 # Need variance
+    # Need at least 1 valid observation
+    valid_counts = np.sum(valid, axis=0)  # (N,)
+    has_obs = valid_counts > 0
     
-    # Denominator: sum((obs - mean_obs)^2)
-    # Mean of obs per pixel
-    # Handle masked mean
-    obs_sum = np.sum(true_kndvi * valid, axis=0)
-    obs_mean = np.divide(obs_sum, valid_counts, out=np.zeros_like(obs_sum), where=valid_counts>0)
+    # --- SSE: sum((obs - pred)^2) at valid timesteps ---
+    diff_sq = (true_ndvi - pred_ndvi) ** 2
+    numerator = np.sum(diff_sq * valid, axis=0)  # (N,)
     
-    term2 = (true_kndvi - obs_mean[np.newaxis, :]) ** 2
+    # --- SST: sum((obs - mean_obs)^2) at valid timesteps ---
+    obs_sum = np.sum(true_ndvi * valid, axis=0)
+    obs_mean = np.divide(obs_sum, valid_counts, 
+                         out=np.zeros_like(obs_sum), where=has_obs)
+    term2 = (true_ndvi - obs_mean[np.newaxis, :]) ** 2
+    denominator = np.sum(term2 * valid, axis=0)  # (N,)
     
-    numerator = np.sum(diff_sq * valid, axis=0)
-    denominator = np.sum(term2 * valid, axis=0)
+    # --- NSE = 1 - SSE/SST ---
+    # When SST=0 (zero temporal variance), division produces NaN.
+    # This matches the official EarthNet xarray behavior where
+    # 0/0 -> NaN, and NaN pixels are excluded from mean().
+    with np.errstate(divide='ignore', invalid='ignore'):
+        nse = 1.0 - (numerator / denominator)
     
-    # NSE = 1 - num/den
-    # Avoid division by zero
-    nse = 1 - np.divide(numerator, denominator + 1e-8, out=np.ones_like(numerator)*(-9999), where=denominator>1e-6)
+    # Pixels with no valid observations also get NaN
+    nse[~has_obs] = np.nan
     
-    # NNSE = 1 / (2 - NSE)
-    # Clip NSE to reasonable range [-10, 1] to avoid exploding NNSE for very bad predictions
-    nse_clipped = np.clip(nse, -10, 1)
-    nnse = 1 / (2 - nse_clipped)
+    # --- nNSE = 1 / (2 - NSE) ---
+    nnse = 1.0 / (2.0 - nse)
     
-    # Aggregate by Landcover
+    # Aggregate by Landcover (NaN pixels will be skipped by nanmean later)
     for i, lc_name in enumerate(LANDCOVER_CLASSES):
-        # Pixels belonging to this class AND having valid NSE
-        indices = np.where((landcover_flat == i) & valid_pixels_mask)[0]
+        indices = np.where((landcover_flat == i) & has_obs)[0]
         if len(indices) > 0:
             lc_nnse[lc_name].extend(nnse[indices])
             
     return lc_nnse
 
-def run_analysis_refined(model_path, max_samples=None):
-    print(f"Loading Main Model from {model_path}...")
-    model_main = load_model(model_path, compile=False)
+def run_analysis_refined(model_path, max_samples=None, split='val_chopped', time_steps=None,
+                         model=None, generator=None):
+    """Run error analysis.
+    
+    Args:
+        model_path: Path to model checkpoint (used only if model is None).
+        max_samples: Maximum samples to evaluate.
+        split: Dataset split name.
+        time_steps: Number of forecast time steps to use.
+        model: Pre-loaded model (optional, avoids redundant loading).
+        generator: Pre-loaded DatasetGenerator (optional, avoids redundant loading).
+    """
+    if model is None:
+        print(f"Loading Main Model from {model_path}...")
+        model_main = load_model(model_path, compile=False)
+    else:
+        print("Using pre-loaded model.")
+        model_main = model
     model_baseline = PersistenceModel()
     
-    print(f"Loading validation dataset...")
-    generator = DatasetGenerator(VALIDATION_PATH)
+    if generator is None:
+        # Select dataset path
+        if split in ['val_chopped', 'val']:
+            dataset_path = VALIDATION_PATH
+        else:
+            dataset_path = DATASET_PATH
+
+        print(f"Loading {split} dataset from {dataset_path}...")
+        generator = DatasetGenerator(dataset_path)
+    else:
+        print("Using pre-loaded generator.")
+    
     # Batch(1) is critical for adapt_inputs
     dataset = generator.get_dataset().batch(1).map(adapt_inputs)
     
@@ -182,32 +208,42 @@ def run_analysis_refined(model_path, max_samples=None):
         true_deltas = y_true_np[0, :, :, :, 1:5]
         bap = y_true_np[0, :, :, :, 5:9]
         
+        # Limit to the first N time steps if specified
+        if time_steps is not None:
+            mask = mask[:time_steps]
+            true_deltas = true_deltas[:time_steps]
+            bap = bap[:time_steps]
+        
         true_abs = bap + true_deltas
-        true_kndvi = compute_kndvi(true_abs[..., 3], true_abs[..., 2]) # (T, H, W)
+        true_ndvi = np.clip(compute_ndvi(true_abs[..., 3], true_abs[..., 2]), -1.0, 1.0) # (T, H, W)
         
         # Landcover
         lc_map = x['landcover_map'].numpy()[0]
         lc_indices = np.argmax(lc_map, axis=-1)
         lc_flat = lc_indices.reshape(-1) # (N,)
         
-        T, H, W = true_kndvi.shape
-        true_kndvi_flat = true_kndvi.reshape(T, -1)
+        T, H, W = true_ndvi.shape
+        true_ndvi_flat = true_ndvi.reshape(T, -1)
         mask_flat = mask.reshape(T, -1)
         
         # --- Evaluate Main Model ---
         pred_main_deltas = model_main.predict(x, verbose=0)
         if isinstance(pred_main_deltas, list): pred_main_deltas = pred_main_deltas[0]
         
-        pred_main_abs = bap + pred_main_deltas[0]
-        pred_main_kndvi = compute_kndvi(pred_main_abs[..., 3], pred_main_abs[..., 2])
-        pred_main_flat = pred_main_kndvi.reshape(T, -1)
+        pred_main_deltas_slice = pred_main_deltas[0]
+        if time_steps is not None:
+            pred_main_deltas_slice = pred_main_deltas_slice[:time_steps]
         
-        stats_main = calculate_vegetation_score_stats(true_kndvi_flat, pred_main_flat, mask_flat, lc_flat)
+        pred_main_abs = bap + pred_main_deltas_slice
+        pred_main_ndvi = np.clip(compute_ndvi(pred_main_abs[..., 3], pred_main_abs[..., 2]), -1.0, 1.0)
+        pred_main_flat = pred_main_ndvi.reshape(T, -1)
+        
+        stats_main = calculate_vegetation_score_stats(true_ndvi_flat, pred_main_flat, mask_flat, lc_flat)
         for lc, vals in stats_main.items():
             results_nnse['Main'][lc].extend(vals)
             
         # --- Temporal Error Accumulation ---
-        # T, H, W = true_kndvi.shape
+        # T, H, W = true_ndvi.shape
         # We want to aggregate over all valid pixels for each timestep t in 0..T-1
         
         if temporal_stats['sse'] is None:
@@ -233,12 +269,12 @@ def run_analysis_refined(model_path, max_samples=None):
         
         if np.any(step_counts > 0):
             # SSE = Sum((True - Pred)^2) masked
-            sq_diff = (true_kndvi - pred_main_kndvi) ** 2
+            sq_diff = (true_ndvi - pred_main_ndvi) ** 2
             step_sse = np.sum(sq_diff * valid_mask, axis=(1, 2)) # (T,)
             
             # Sum Obs and Sum Obs^2 for Variance
-            step_sum_obs = np.sum(true_kndvi * valid_mask, axis=(1, 2))
-            step_sum_obs_sq = np.sum((true_kndvi ** 2) * valid_mask, axis=(1, 2))
+            step_sum_obs = np.sum(true_ndvi * valid_mask, axis=(1, 2))
+            step_sum_obs_sq = np.sum((true_ndvi ** 2) * valid_mask, axis=(1, 2))
             
             temporal_stats['sse'] += step_sse
             temporal_stats['count'] += step_counts
@@ -248,10 +284,10 @@ def run_analysis_refined(model_path, max_samples=None):
         # --- Evaluate Baseline Model (Persistence) ---
         # Persistence means pred_deltas = 0, so pred_abs = BAP
         pred_base_abs = bap # + 0
-        pred_base_kndvi = compute_kndvi(pred_base_abs[..., 3], pred_base_abs[..., 2])
-        pred_base_flat = pred_base_kndvi.reshape(T, -1)
+        pred_base_ndvi = np.clip(compute_ndvi(pred_base_abs[..., 3], pred_base_abs[..., 2]), -1.0, 1.0)
+        pred_base_flat = pred_base_ndvi.reshape(T, -1)
         
-        stats_base = calculate_vegetation_score_stats(true_kndvi_flat, pred_base_flat, mask_flat, lc_flat)
+        stats_base = calculate_vegetation_score_stats(true_ndvi_flat, pred_base_flat, mask_flat, lc_flat)
         for lc, vals in stats_base.items():
             results_nnse['Baseline'][lc].extend(vals)
             
@@ -265,16 +301,17 @@ def run_analysis_refined(model_path, max_samples=None):
     for lc in LANDCOVER_CLASSES:
         # Main
         nnse_main = np.array(results_nnse['Main'][lc])
-        if len(nnse_main) > 0:
-            mean_nnse_main = np.mean(nnse_main)
+        # Only compute Vegetation Score for Vegetation Classes
+        if lc in VEGETATION_CLASSES and len(nnse_main) > 0:
+            mean_nnse_main = np.nanmean(nnse_main)
             veg_score_main = 2 - (1 / mean_nnse_main)
         else:
             veg_score_main = np.nan
             
         # Baseline
         nnse_base = np.array(results_nnse['Baseline'][lc])
-        if len(nnse_base) > 0:
-            mean_nnse_base = np.mean(nnse_base)
+        if lc in VEGETATION_CLASSES and len(nnse_base) > 0:
+            mean_nnse_base = np.nanmean(nnse_base)
             veg_score_base = 2 - (1 / mean_nnse_base)
         else:
             veg_score_base = np.nan
@@ -325,7 +362,7 @@ def run_analysis_refined(model_path, max_samples=None):
                 nse = np.nan
                 
             temp_data.append({
-                'Step': t + 1,
+                'Step': (t + 1) * 5,
                 'RMSE': rmse,
                 'NSE': nse,
                 'Count': N
@@ -344,20 +381,21 @@ def plot_temporal_error(df_temporal):
     
     ax1 = plt.gca()
     sns.lineplot(data=df_temporal, x='Step', y='RMSE', marker='o', ax=ax1, color='blue', label='Root Mean Square Error (RMSE)')
-    ax1.set_ylabel('RMSE (kNDVI)', color='blue')
+    ax1.set_xlabel('Forecast Horizon (days)')
+    ax1.set_ylabel('RMSE (NDVI)', color='blue')
     ax1.tick_params(axis='y', labelcolor='blue')
     
     ax2 = ax1.twinx()
     sns.lineplot(data=df_temporal, x='Step', y='NSE', marker='s', ax=ax2, color='orange', label='Nash-Sutcliffe Efficiency (NSE)')
     ax2.set_ylabel('NSE', color='orange')
     ax2.tick_params(axis='y', labelcolor='orange')
-    ax2.set_ylim(-0.2, 1.0)
     
     ax1.grid(True, alpha=0.3)
     
     lines1, labels1 = ax1.get_legend_handles_labels()
     lines2, labels2 = ax2.get_legend_handles_labels()
-    ax1.legend(lines1 + lines2, labels1 + labels2, loc='center right')
+    ax2.get_legend().remove() if ax2.get_legend() else None
+    ax1.legend(lines1 + lines2, labels1 + labels2, loc='best')
     
     out_path = os.path.join(OUTPUT_DIR, "temporal_error.png")
     plt.savefig(out_path, bbox_inches='tight')
@@ -382,7 +420,6 @@ def plot_comparison(df):
     
     plt.title('Vegetation Score: Model vs Persistence Baseline')
     plt.ylabel('Vegetation Score (1 is perfect)')
-    plt.ylim(-0.5, 1.1)
     plt.xticks(rotation=45)
     plt.legend()
     plt.grid(axis='y', alpha=0.3)
@@ -393,13 +430,27 @@ def plot_comparison(df):
     print(f"Saved plot to {out_path}")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--model", type=str, default="checkpoints/final_model.keras")
-    parser.add_argument("--max_samples", type=int, default=None)
+    parser = argparse.ArgumentParser(description="Run error analysis for GreenEarthNet model.")
+    parser.add_argument("--model", type=str, default="checkpoints/final_model.keras",
+                        help="Path to model checkpoint")
+    parser.add_argument("--max_samples", type=int, default=None,
+                        help="Maximum samples to evaluate (None = all)")
+    parser.add_argument("--output", type=str, default=None,
+                        help="Output directory for results (default: images/results/error_analysis)")
+    parser.add_argument("--split", type=str, default="val_chopped",
+                        choices=['train', 'val_chopped', 'val'],
+                        help="Dataset split to analyze (default: val_chopped)")
+    parser.add_argument("--time_steps", type=int, default=10,
+                        help="Number of forecast time steps to use in analysis (default: 10)")
     args = parser.parse_args()
     
     if not os.path.exists(args.model):
         print(f"Error: {args.model} not found")
         exit(1)
-        
-    run_analysis_refined(args.model, args.max_samples)
+    
+    # Update output directory if specified
+    if args.output:
+        OUTPUT_DIR = args.output
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    
+    run_analysis_refined(args.model, args.max_samples, args.split, args.time_steps)

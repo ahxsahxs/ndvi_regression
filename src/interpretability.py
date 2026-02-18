@@ -49,11 +49,12 @@ Summary:
 
 import argparse
 import numpy as np
+import pandas as pd
 import tensorflow as tf
 import keras
 from dataset import DatasetGenerator
 from build_model import load_model, RegressionParameterHead
-from config import DATASET_PATH
+from config import DATASET_PATH, VALIDATION_PATH
 
 # ESA WorldCover 10m v100 classes
 # 10: Tree cover, 20: Shrubland, 30: Grassland, 40: Cropland, 
@@ -275,8 +276,8 @@ def analyze_sample(model, dataset_iterator, sample_idx=0):
         stats['B'].append(mean_B)
         
         print(f"{b_name:<12} | {mean_A:8.4f}   | {mean_L:8.4f}   | {mean_B:8.4f}")
-        
-    interpret_dynamics(stats)
+    
+    return stats
 
 def interpret_dynamics(stats):
     print("\n--- Vegetation Dynamics Interpretation ---")
@@ -330,33 +331,52 @@ def interpret_dynamics(stats):
     for c in conclusions:
         print(f"- {c}")
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--model", type=int, default=None, help="Epoch to load (default: final_model)")
-    parser.add_argument("--samples", type=int, default=3, help="Number of samples to analyze")
-    args = parser.parse_args()
+def run_interpretability(n_samples=10, output_path=None, split='train', model_epoch=None,
+                         model=None, generator=None):
+    """Run interpretability analysis.
     
-    if args.model is None:
-        model_path = os.path.join(CHECKPOINTS_DIR, "final_model.keras")
+    Args:
+        n_samples: Number of samples to analyze.
+        output_path: Output CSV file path for Table 4.2.
+        split: Dataset split (train/val_chopped).
+        model_epoch: Epoch to load (default: final_model).
+        model: Pre-loaded full model (optional, avoids redundant loading).
+        generator: Pre-loaded DatasetGenerator (optional, avoids redundant loading).
+    """
+    if model is None:
+        if model_epoch is None:
+            model_path = os.path.join(CHECKPOINTS_DIR, "final_model.keras")
+        else:
+            model_path = os.path.join(CHECKPOINTS_DIR, f"model_at_{model_epoch}.keras")
+            
+        print(f"Loading full model from {model_path}...")
+        try:
+            model = load_model(model_path, compile=False)
+        except Exception as e:
+            print(f"Error loading model: {e}")
+            return
     else:
-        model_path = os.path.join(CHECKPOINTS_DIR, f"model_at_{args.model}.keras")
-        
-    print(f"Loading full model from {model_path}...")
-    try:
-        full_model = load_model(model_path, compile=False)
-    except Exception as e:
-        print(f"Error loading model: {e}")
-        return
+        print("Using pre-loaded model.")
 
     print("Extracting parameter sub-model...")
     try:
-        param_model = get_parameter_model(full_model)
+        param_model = get_parameter_model(model)
     except Exception as e:
         print(f"Error extracting parameters: {e}")
         return
         
-    print("Loading dataset...")
-    generator = DatasetGenerator(DATASET_PATH)
+    if generator is None:
+        # Select dataset path
+        if split in ['val_chopped', 'val']:
+            dataset_path = VALIDATION_PATH
+        else:
+            dataset_path = DATASET_PATH
+
+        print(f"Loading {split} dataset from {dataset_path}...")
+        generator = DatasetGenerator(dataset_path)
+    else:
+        print("Using pre-loaded generator.")
+    
     dataset = generator.get_dataset().batch(1)
     
     # Need to adapt inputs just like in visualize.py/train.py
@@ -375,8 +395,88 @@ def main():
     dataset = dataset.map(adapt_inputs)
     iterator = iter(dataset)
     
-    for i in range(args.samples):
-        analyze_sample(param_model, iterator, sample_idx=i)
+    # Collect stats across all samples
+    all_stats = []
+    
+    for i in range(n_samples):
+        stats = analyze_sample(param_model, iterator, sample_idx=i)
+        if stats is not None:
+            all_stats.append(stats)
+            interpret_dynamics(stats)
+    
+    # Aggregate across samples
+    if all_stats and output_path:
+        print(f"\n--- Aggregated Statistics ({len(all_stats)} samples) ---")
+        
+        bands = ["Blue (B02)", "Green (B03)", "Red (B04)", "NIR (B8A)"]
+        aggregated = {
+            'Band': bands,
+            'A (Amplitude)': [],
+            'λ (Rate)': [],
+            'B (Offset)': [],
+            'Interpretation': []
+        }
+        
+        for b_idx in range(4):
+            mean_A = np.mean([s['A'][b_idx] for s in all_stats])
+            mean_L = np.mean([s['lambda'][b_idx] for s in all_stats])
+            mean_B = np.mean([s['B'][b_idx] for s in all_stats])
+            
+            aggregated['A (Amplitude)'].append(f"{mean_A:.4f}")
+            aggregated['λ (Rate)'].append(f"{mean_L:.4f}")
+            aggregated['B (Offset)'].append(f"{mean_B:.4f}")
+            
+            # Interpretation
+            if b_idx == 0:  # Blue
+                aggregated['Interpretation'].append("Low variability")
+            elif b_idx == 1:  # Green
+                aggregated['Interpretation'].append("Moderate dynamics")
+            elif b_idx == 2:  # Red
+                aggregated['Interpretation'].append("Chlorophyll response")
+            else:  # NIR
+                aggregated['Interpretation'].append("Biomass indicator")
+        
+        df = pd.DataFrame(aggregated)
+        
+        # Create output directory if needed
+        output_dir = os.path.dirname(output_path)
+        if output_dir:
+            os.makedirs(output_dir, exist_ok=True)
+        
+        df.to_csv(output_path, index=False)
+        print(f"Saved aggregated statistics to {output_path}")
+        print(df.to_string(index=False))
+        
+        # Also output dynamics summary
+        print("\n--- Aggregated Vegetation Dynamics ---")
+        mean_A_nir = np.mean([s['A'][3] for s in all_stats])
+        mean_A_red = np.mean([s['A'][2] for s in all_stats])
+        mean_L_nir = np.mean([s['lambda'][3] for s in all_stats])
+        mean_L_red = np.mean([s['lambda'][2] for s in all_stats])
+        
+        print(f"Amplitude Delta (NIR - RED): {mean_A_nir - mean_A_red:.4f}")
+        print(f"Rate Delta (NIR - RED): {mean_L_nir - mean_L_red:.4f}")
+        
+        if mean_A_nir > mean_A_red:
+            print("Trend: Vegetation greening (NIR dominance)")
+        else:
+            print("Trend: Vegetation stress/browning (reduced NIR)")
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model", type=int, default=None, help="Epoch to load (default: final_model)")
+    parser.add_argument("--samples", type=int, default=10, help="Number of samples to analyze")
+    parser.add_argument("--output", type=str, default=None, help="Output CSV file path for Table 4.2")
+    parser.add_argument("--split", type=str, default="train", help="Dataset split (train/val_chopped)")
+    args = parser.parse_args()
+    
+    run_interpretability(
+        n_samples=args.samples,
+        output_path=args.output,
+        split=args.split,
+        model_epoch=args.model
+    )
 
 if __name__ == "__main__":
     main()

@@ -2,12 +2,14 @@
 \addvspace {10\p@ }
 \addvspace {10\p@ }
 \addvspace {10\p@ }
-\contentsline {table}{\numberline {3.1}{\ignorespaces Sentinel-2 spectral bands used in this study\relax }}{17}{table.caption.5}%
-\contentsline {table}{\numberline {3.2}{\ignorespaces E-OBS climate variables\relax }}{17}{table.caption.7}%
-\contentsline {table}{\numberline {3.3}{\ignorespaces GreenEarthNet dataset splits\relax }}{18}{table.caption.9}%
-\contentsline {table}{\numberline {3.4}{\ignorespaces Growth curve parameters and their interpretations\relax }}{22}{table.caption.14}%
-\contentsline {table}{\numberline {3.5}{\ignorespaces Training hyperparameters\relax }}{25}{table.caption.15}%
-\contentsline {table}{\numberline {3.6}{\ignorespaces Model parameter count by component\relax }}{25}{table.caption.16}%
+\contentsline {table}{\numberline {3.1}{\ignorespaces Sentinel-2 spectral bands used in this study\relax }}{17}{table.caption.6}%
+\contentsline {table}{\numberline {3.2}{\ignorespaces E-OBS climate variables\relax }}{18}{table.caption.8}%
+\contentsline {table}{\numberline {3.3}{\ignorespaces GreenEarthNet dataset splits\relax }}{19}{table.caption.10}%
+\contentsline {table}{\numberline {3.4}{\ignorespaces Growth curve parameters and their interpretations\relax }}{23}{table.caption.15}%
+\contentsline {table}{\numberline {3.5}{\ignorespaces Training hyperparameters\relax }}{26}{table.caption.16}%
+\contentsline {table}{\numberline {3.6}{\ignorespaces Model parameter count by component\relax }}{27}{table.caption.17}%
 \addvspace {10\p@ }
-\contentsline {table}{\numberline {4.1}{\ignorespaces Per-band error metrics on validation set\relax }}{26}{table.caption.17}%
-\contentsline {table}{\numberline {4.2}{\ignorespaces Model comparison on GreenEarthNet benchmark\relax }}{31}{table.caption.23}%
+\contentsline {table}{\numberline {4.1}{\ignorespaces Per-band prediction error on the GreenEarthNet validation set\relax }}{29}{table.caption.18}%
+\contentsline {table}{\numberline {4.2}{\ignorespaces kNDVI prediction metrics by ESA WorldCover land cover class\relax }}{31}{table.caption.22}%
+\contentsline {table}{\numberline {4.3}{\ignorespaces Nash-Sutcliffe Efficiency comparison on GreenEarthNet validation set. Vegetation Score is the mean score across vegetated land cover classes (Tree cover, Shrubland, Grassland).\relax }}{32}{table.caption.23}%
+\contentsline {table}{\numberline {4.4}{\ignorespaces Average growth curve parameters for vegetated regions\relax }}{35}{table.caption.25}%
