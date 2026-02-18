@@ -208,5 +208,8 @@ __marimo__/
 
 
 checkpoints
+!checkpoints/final_model.keras
 logs
 src/__pycache__
+predictions
+predictions_test
