@@ -1,8 +1,0 @@
-Metric,Training,Validation
-Number of Samples,200,100
-Input Sequence Length,10,10
-Output Sequence Length,20,20
-Image Size,128×128,128×128
-Spectral Bands,4,4
-Mean Cloud Coverage (%),17.7,9.9
-Reflectance Range (Mean),[0.1400],[0.1432]
