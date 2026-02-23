@@ -6,36 +6,6 @@ import pandas as pd
 from pathlib import Path
 import tensorflow as tf
 
-def percentile_contrast(data: np.ndarray, p_min: int, p_max: int) -> np.ndarray:
-    """
-    Applies percentile-based contrast stretching to data.
-
-    :param data: Input array to normalize.
-    :type data: np.ndarray
-    :param p_min: Lower percentile for clipping.
-    :type p_min: int
-    :param p_max: Upper percentile for clipping.
-    :type p_max: int
-    :return: Normalized array scaled to [0, 1].
-    :rtype: np.ndarray
-    """
-    val_min, val_max = np.nanpercentile(data, [p_min, p_max])
-    clipped_data = np.clip(data, val_min, val_max)
-    return (clipped_data - val_min) / (val_max - val_min)
-
-
-def scale_to_01(data: np.ndarray) -> np.ndarray:
-    """
-    Scales data to [0, 1] range using min-max normalization.
-
-    :param data: Input array to normalize.
-    :type data: np.ndarray
-    :return: Normalized array scaled to [0, 1].
-    :rtype: np.ndarray
-    """
-    val_min = np.nanmin(data)
-    val_max = np.nanmax(data)
-    return (data - val_min) / (val_max - val_min)
 
 class DatasetGenerator:
     S2_BANDS = ['s2_B02', 's2_B03', 's2_B04', 's2_B8A']
@@ -135,6 +105,15 @@ class DatasetGenerator:
         # Include NaNs in mask
         s2_mask = np.maximum(s2_mask, s2_nans.astype(np.float32))
         sentinel2 = np.nan_to_num(sentinel2, nan=0)
+
+        # Global normalization preserving inter-temporal relationships
+        global_min = np.min(sentinel2)
+        global_max = np.max(sentinel2)
+        denom = global_max - global_min
+        if denom > 0:
+            sentinel2 = (sentinel2 - global_min) / denom
+        else:
+            sentinel2 = np.zeros_like(sentinel2)
 
         return sentinel2, s2_mask
 

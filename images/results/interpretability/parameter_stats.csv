@@ -1,5 +1,0 @@
-Band,A (Amplitude),λ (Rate),B (Offset),Interpretation
-Blue (B02),-0.0016,0.1560,0.0055,Low variability
-Green (B03),-0.0104,0.1646,0.0045,Moderate dynamics
-Red (B04),-0.0056,0.1835,0.0030,Chlorophyll response
-NIR (B8A),-0.1843,0.1778,-0.0039,Biomass indicator

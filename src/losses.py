@@ -139,21 +139,21 @@ class ImprovedkNDVILoss(keras.losses.Loss):
     Combined loss for delta prediction with balanced component scaling.
     
     Components (with default weights prioritizing regression):
-    - Huber loss on deltas for regression (weight=10.0, primary objective)
-    - Variance penalty to prevent mode collapse (weight=1.0, regularizer)
-    - kNDVI loss for spectral consistency (weight=0.1 when enabled, auxiliary)
+    - Log-Cosh loss on deltas for regression (primary objective)
+    - Edge penalty to preserve spatial structure (regularizer)
+    - kNDVI loss for spectral consistency (auxiliary, when enabled)
     
-    All components are normalized to similar scales before weighting to ensure
-    no single component dominates the gradient signal.
-    
-    The variance penalty computes the absolute difference between the spatial
-    variance of true deltas and predicted deltas, encouraging the model to
-    preserve spatial variability rather than collapsing to constant predictions.
+    Log-Cosh replaces Huber because it provides smoothly growing gradients:
+    - For small errors: behaves like 0.5 * x² (MSE-like, quadratic gradient)
+    - For large errors: behaves like |x| - log(2) (L1-like, but gradient
+      keeps growing via tanh, never caps like Huber)
+    - Gradient = tanh(error), which smoothly transitions from linear to
+      saturating — no hard cutoff at delta threshold
     """
     def __init__(
         self, 
-        regression_weight=5.0,   # Primary objective weight
-        variance_weight=2.0,     # Regularizer weight
+        regression_weight=1.0,   # Primary objective weight
+        edge_weight=1.0,         # Regularizer weight
         kndvi_weight=0.0,        # Auxiliary loss weight (0 = disabled, set via callback)
         kndvi_clip=0.5,          # Max kNDVI difference (gradient clipping)
         sigma=1.0,               # RBF kernel sigma
@@ -162,13 +162,25 @@ class ImprovedkNDVILoss(keras.losses.Loss):
     ):
         super().__init__(name=name, **kwargs)
         self.regression_weight = regression_weight
-        self.variance_weight = variance_weight
+        self.edge_weight = edge_weight
         self.kndvi_weight = tf.Variable(kndvi_weight, trainable=False, dtype=tf.float32, name='kndvi_weight')
         self.kndvi_clip = kndvi_clip
         self.sigma = sigma
+
+    def log_cosh_loss(self, y_true, y_pred):
+        """
+        Log-Cosh loss: log(cosh(error)), averaged over the last axis (bands).
         
-        # Reduced Huber delta to 0.1 for stronger gradients on small delta errors
-        self.fn_huber = keras.losses.Huber(delta=0.1, reduction="none")
+        Gradient = tanh(error), which grows smoothly from 0 to ±1.
+        Unlike Huber, there is no hard δ threshold — gradients always
+        increase with error magnitude.
+        """
+        error = y_pred - y_true  # (B, T, H, W, C)
+        # log(cosh(x)) is numerically stable for |x| < ~20
+        # For large |x|: log(cosh(x)) ≈ |x| - log(2)
+        loss = tf.math.log(tf.math.cosh(error))
+        # Average over bands (last axis) to get (B, T, H, W)
+        return tf.reduce_mean(loss, axis=-1)
 
     def kernel_function(self, n, r):
         """RBF Kernel k(n, r) = exp(-(n-r)^2 / (2*sigma^2))"""
@@ -193,61 +205,29 @@ class ImprovedkNDVILoss(keras.losses.Loss):
         sample_weight = 1.0 - cloudmask
         weight_sum = tf.reduce_sum(sample_weight) + 1e-6
         
-        # --- 1. Regression Loss (Huber on Deltas) ---
-        # Expected range: ~0.001 to 0.05 for well-behaved deltas
-        reg_loss = self.fn_huber(true_deltas, pred_deltas)
+        # --- 1. Regression Loss (Log-Cosh on Deltas) ---
+        reg_loss = self.log_cosh_loss(true_deltas, pred_deltas)  # (B, T, H, W)
         masked_reg_loss = reg_loss * tf.squeeze(sample_weight, axis=-1)
-        total_reg_loss = (tf.reduce_sum(masked_reg_loss) / weight_sum) * 10.0
+        total_reg_loss = tf.reduce_sum(masked_reg_loss) / weight_sum
         
-        # --- 2. Variance Penalty (prevent mode collapse) ---
-        # Compute spatial variance of true and predicted deltas per sample
-        # Expected range: ~0.0001 to 0.01 (variance of small deltas)
-        weights_expanded = sample_weight  # (B, T, H, W, 1)
+        # --- 2. Edge Penalty (preserve spatial structure) ---
+        shape = tf.shape(true_deltas)
+        B, T, H, W, C = shape[0], shape[1], shape[2], shape[3], shape[4]
         
-        # Weighted mean per sample per band
-        true_weighted = true_deltas * weights_expanded
-        pred_weighted = pred_deltas * weights_expanded
+        true_flat = tf.reshape(true_deltas, [-1, H, W, C])
+        pred_flat = tf.reshape(pred_deltas, [-1, H, W, C])
+        weights_flat = tf.reshape(sample_weight, [-1, H, W, 1])
         
-        # Mean across spatial dims (H, W) - shape becomes (B, T, 1, 1, 4)
-        spatial_weight_sum = tf.reduce_sum(weights_expanded, axis=[2, 3], keepdims=True) + 1e-6
-        true_mean = tf.reduce_sum(true_weighted, axis=[2, 3], keepdims=True) / spatial_weight_sum
-        pred_mean = tf.reduce_sum(pred_weighted, axis=[2, 3], keepdims=True) / spatial_weight_sum
+        true_dy, true_dx = tf.image.image_gradients(true_flat)
+        pred_dy, pred_dx = tf.image.image_gradients(pred_flat)
         
-        # Variance = E[(x - mean)^2]
-        spatial_weight_sum_squeezed = tf.reduce_sum(weights_expanded, axis=[2, 3]) + 1e-6
-        true_var = tf.reduce_sum(weights_expanded * tf.square(true_deltas - true_mean), axis=[2, 3]) / spatial_weight_sum_squeezed
-        pred_var = tf.reduce_sum(weights_expanded * tf.square(pred_deltas - pred_mean), axis=[2, 3]) / spatial_weight_sum_squeezed
+        edge_loss_y = tf.abs(true_dy - pred_dy) * weights_flat
+        edge_loss_x = tf.abs(true_dx - pred_dx) * weights_flat
         
-        # Variance penalty: abs difference between true and pred variance
-        # Scale by 100 to bring into similar range as regression loss (~0.01-0.1)
-        variance_penalty = tf.reduce_mean(tf.abs(true_var - pred_var)) * 100.0
-        
-        # --- 3. kNDVI Loss (optional, controlled by kndvi_weight) ---
-        # Expected range: ~0.01 to 0.3 (kNDVI differences)
-        true_full = bap + true_deltas
-        pred_full = bap + pred_deltas
-        
-        true_red, true_nir = true_full[..., 2], true_full[..., 3]
-        pred_red, pred_nir = pred_full[..., 2], pred_full[..., 3]
-        
-        true_kndvi = self.compute_kndvi(true_nir, true_red)
-        pred_kndvi = self.compute_kndvi(pred_nir, pred_red)
-        
-        # Clipped L1 to prevent gradient explosion
-        kndvi_diff = tf.abs(true_kndvi - pred_kndvi)
-        kndvi_diff = tf.minimum(kndvi_diff, self.kndvi_clip)
-        
-        masked_kndvi_loss = kndvi_diff * tf.squeeze(sample_weight, axis=-1)
-        # Scale by 1.0 (no scaling needed as kNDVI is already in [0,1] range approx, diffs are small)
-        total_kndvi_loss = tf.reduce_sum(masked_kndvi_loss) / weight_sum
+        total_edge_loss = tf.reduce_sum(edge_loss_y + edge_loss_x) / weight_sum
         
         # --- Combine Losses with Weights ---
-        # All components now normalized to ~0.01-0.1 range before weighting
-        total_loss = (
-            self.regression_weight * total_reg_loss +
-            self.variance_weight * variance_penalty +
-            self.kndvi_weight * total_kndvi_loss
-        )
+        total_loss = self.regression_weight * total_reg_loss + self.edge_weight * total_edge_loss
         
         return total_loss
 
@@ -255,7 +235,7 @@ class ImprovedkNDVILoss(keras.losses.Loss):
         config = super().get_config()
         config.update({
             'regression_weight': self.regression_weight,
-            'variance_weight': self.variance_weight,
+            'edge_weight': self.edge_weight,
             'kndvi_weight': float(self.kndvi_weight.numpy()),
             'kndvi_clip': self.kndvi_clip,
             'sigma': self.sigma,

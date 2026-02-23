@@ -7,5 +7,5 @@ MODEL_CONFIG = {
     "conv_filters": [60, 60, 60],
     "poly_degree": 2,
 }
-DATASET_PATH = "/home/me/workspace/probformer/data/greenearthnet/train"
-VALIDATION_PATH = "/home/me/workspace/probformer/data/greenearthnet/val_chopped"
+DATASET_PATH = "/home/me/workspace/probformer/data/greenearthnet/sub_train"
+VALIDATION_PATH = "/home/me/workspace/probformer/data/greenearthnet/sub_val"

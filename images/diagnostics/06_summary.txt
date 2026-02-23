@@ -1,0 +1,38 @@
+======================================================================
+  WEAK SIGNAL DIAGNOSTIC REPORT
+======================================================================
+
+1. ERROR VS FORECAST HORIZON
+   MAE at t=1 (day 55):  0.03940
+   MAE at t=20 (day 150): 0.02464
+   Growth ratio (last/first): 0.63×
+
+2. AMPLITUDE GAP
+   Mean |target delta|:    0.03176
+   Mean |predicted delta|: 0.02311
+   Under-prediction ratio: 1.37× (target is 1.4× larger)
+   Quantile comparison (target / predicted):
+     P50: 0.01669 / 0.01114  = 1.50×
+     P75: 0.03610 / 0.02705  = 1.33×
+     P90: 0.07315 / 0.05580  = 1.31×
+     P95: 0.10560 / 0.08243  = 1.28×
+     P99: 0.20978 / 0.15832  = 1.32×
+
+3. FOURIER COEFFICIENT ANALYSIS
+   Mean |coeff_scale|:       0.7866
+   Max |coeff_scale|:        0.9709
+   Theoretical max |delta|:  10.1468
+   Conv kernel weight std:   0.0116
+
+4. PER-BAND REGRESSION SLOPES (1.0 = perfect, <1 = under-prediction)
+   B02 (Blue): slope = 0.389  [UNDER-PREDICTING]
+   B03 (Green): slope = 0.416  [UNDER-PREDICTING]
+   B04 (Red): slope = 0.433  [UNDER-PREDICTING]
+   B8A (NIR): slope = 0.356  [UNDER-PREDICTING]
+
+======================================================================
+  ASSESSMENT
+======================================================================
+
+STATUS: SIGNIFICANT under-prediction (mean slope 0.40).
+        Consider changes to loss function or coefficient scaling.

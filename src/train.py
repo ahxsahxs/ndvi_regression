@@ -103,7 +103,7 @@ def train_bspline_model(
         )
         loss = ImprovedkNDVILoss(
             regression_weight=5.0,
-            variance_weight=2.0,
+            edge_weight=0.5,
             kndvi_clip=0.5,      # Gradient clipping threshold
             sigma=1.0            # RBF kernel sigma
         )
@@ -244,8 +244,8 @@ def main():
     parser.add_argument('--resume_from', type=str, default=None, help='Path to .keras model file to resume training from')
     
     # Hyperparameters
-    parser.add_argument('--batch_size', type=int, default=32, help='Batch size')
-    parser.add_argument('--epochs', type=int, default=500, help='Number of epochs')
+    parser.add_argument('--batch_size', type=int, default=1, help='Batch size')
+    parser.add_argument('--epochs', type=int, default=100, help='Number of epochs')
     parser.add_argument('--learning_rate', type=float, default=3e-4, help='Initial learning rate')
     parser.add_argument('--initial_epoch', type=int, default=0, help='Epoch to start/resume from')
 

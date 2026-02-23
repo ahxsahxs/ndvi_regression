@@ -46,25 +46,33 @@ class LastTimestepLayer(layers.Layer):
 
 
 @keras.utils.register_keras_serializable(package="EOModel")
-class RegressionParameterHead(layers.Layer):
+class FourierCoefficientHead(layers.Layer):
     """
-    Generates triplet regression parameters (A, λ, B) from latent embedding.
+    Predicts Fourier harmonic coefficients (a_k, b_k) from latent embedding.
     
-    Takes a latent space embedding and outputs three parameter maps:
-    - A (amplitude): Linear activation, can be negative for decreasing trends
-    - λ (rate): Softplus activation to ensure λ > 0
-    - B (offset): Linear activation for baseline offset
+    Replaces the old RegressionParameterHead (A, λ, B) with a set of
+    cosine/sine amplitude coefficients per pixel per band, enabling
+    non-monotonic temporal dynamics.
     
-    :param n_bands: Number of output bands (default 4 for RGBNIR).
+    Output per pixel per band: [a_1, b_1, a_2, b_2, ..., a_K, b_K]
+    
+    :param n_bands: Number of output spectral bands (default 4).
     :type n_bands: int
+    :param n_harmonics: Number of Fourier harmonics K (default 3).
+    :type n_harmonics: int
     :param hidden_units: Hidden units in intermediate conv layers.
     :type hidden_units: int
+    :param noise_stddev: Training noise for diversity (default 0.02).
+    :type noise_stddev: float
     """
-    def __init__(self, n_bands=4, hidden_units=64, noise_stddev=0.02, **kwargs):
+    def __init__(self, n_bands=4, n_harmonics=3, hidden_units=64,
+                 noise_stddev=0.02, **kwargs):
         super().__init__(**kwargs)
         self.n_bands = n_bands
+        self.n_harmonics = n_harmonics
+        self.n_coeffs = 2 * n_harmonics  # a_k and b_k per harmonic
         self.hidden_units = hidden_units
-        self.noise_stddev = noise_stddev  # Diversity noise during training
+        self.noise_stddev = noise_stddev
         
         # Shared feature extraction
         self.conv1 = layers.Conv2D(
@@ -72,120 +80,82 @@ class RegressionParameterHead(layers.Layer):
             kernel_size=(3, 3),
             padding='same',
             activation='relu',
-            kernel_regularizer=regularizers.l2(1e-5),
-            name='param_conv1'
+            kernel_regularizer=regularizers.l2(1e-4),
+            name='fourier_conv1'
         )
         self.conv2 = layers.Conv2D(
             filters=hidden_units,
             kernel_size=(3, 3),
             padding='same',
             activation='relu',
-            kernel_regularizer=regularizers.l2(1e-5),
-            name='param_conv2'
+            kernel_regularizer=regularizers.l2(1e-4),
+            name='fourier_conv2'
         )
         
-        # Separate heads for each parameter
-        # A: amplitude (linear, can be positive or negative)
-        self.conv_A = layers.Conv2D(
-            filters=n_bands,
+        # Coefficient head: outputs all coefficients for all bands at once
+        # Shape: (B, H, W, n_bands * 2K)
+        self.conv_coeffs = layers.Conv2D(
+            filters=n_bands * self.n_coeffs,
             kernel_size=(1, 1),
             padding='same',
             activation=None,
-            kernel_regularizer=regularizers.l2(1e-5),
-            name='param_A'
+            kernel_regularizer=regularizers.l2(1e-4),
+            name='fourier_coeffs'
         )
         
-        # λ: rate (softplus to ensure > 0, initialized near 1.0)
-        self.conv_lambda = layers.Conv2D(
-            filters=n_bands,
-            kernel_size=(1, 1),
-            padding='same',
-            activation='softplus',
-            kernel_regularizer=regularizers.l2(1e-5),
-            name='param_lambda'
-        )
-        
-        # B: offset (linear)
-        self.conv_B = layers.Conv2D(
-            filters=n_bands,
-            kernel_size=(1, 1),
-            padding='same',
-            activation=None,
-            kernel_regularizer=regularizers.l2(1e-5),
-            name='param_B'
-        )
-        
-        # --- Mode Collapse Safeguards ---
-        # Learnable scale/bias to prevent trivial zero outputs
-        self.A_scale = self.add_weight(
-            name='A_scale', shape=(1, 1, 1, n_bands),
+        # Learnable amplitude scale per band per coefficient
+        self.coeff_scale = self.add_weight(
+            name='coeff_scale', shape=(1, 1, 1, n_bands, self.n_coeffs),
             initializer=keras.initializers.Constant(1.0),
-            trainable=True
-        )
-        self.lambda_min = self.add_weight(
-            name='lambda_min', shape=(1, 1, 1, n_bands),
-            initializer=keras.initializers.Constant(0.5),
-            trainable=True
-        )
-        self.lambda_scale = self.add_weight(
-            name='lambda_scale', shape=(1, 1, 1, n_bands),
-            initializer=keras.initializers.Constant(2.0),
             trainable=True
         )
     
     def call(self, latent, training=None):
         """
         Args:
-            latent: (Batch, H, W, C) latent embedding
+            latent: (Batch, H, W, C) latent embedding from encoder
             training: Whether in training mode (for noise injection)
         
         Returns:
-            Tuple of (A, lambda_param, B), each with shape (Batch, H, W, n_bands)
+            coefficients: (Batch, H, W, n_bands, 2K) Fourier coefficients
         """
         x = self.conv1(latent)
         x = self.conv2(x)
         
-        # --- Amplitude A ---
-        # Use tanh to bound A, then scale by learnable factor
-        # This prevents A from going to zero (trivial solution)
-        A_raw = self.conv_A(x)
-        A = tf.tanh(A_raw) * tf.abs(self.A_scale)  # Bounded, non-zero scale
+        # Raw coefficient prediction: (B, H, W, n_bands * 2K)
+        raw = self.conv_coeffs(x)
         
-        # Add diversity noise during training to prevent all pixels having same A
+        # Reshape to (B, H, W, n_bands, 2K)
+        shape = tf.shape(raw)
+        coeffs = tf.reshape(raw, [shape[0], shape[1], shape[2],
+                                  self.n_bands, self.n_coeffs])
+        
+        # Scale by learnable amplitude — no activation bounding.
+        # Amplitude is controlled by L2 regularization on conv layers
+        # instead of softsign/tanh, allowing the model to learn larger
+        # coefficients for fast vegetation changes.
+        coeffs = coeffs * self.coeff_scale
+        
+        # Add diversity noise during training
         if training:
-            A = A + tf.random.normal(tf.shape(A), stddev=self.noise_stddev)
+            coeffs = coeffs + tf.random.normal(
+                tf.shape(coeffs), stddev=self.noise_stddev)
         
-        # --- Growth Rate λ ---
-        # Constrain to [lambda_min, lambda_min + lambda_scale]
-        # This prevents λ→0 (no growth) or λ→∞ (instant saturation)
-        lambda_raw = self.conv_lambda(x)  # Already softplus, so > 0
-        lambda_min_abs = tf.abs(self.lambda_min) + 0.1  # Ensure min > 0
-        lambda_scale_abs = tf.abs(self.lambda_scale) + 0.1
-        lambda_param = lambda_min_abs + tf.sigmoid(lambda_raw) * lambda_scale_abs
-        
-        # --- Offset B ---
-        # Small offset, bounded to prevent B from absorbing all variation
-        B_raw = self.conv_B(x)
-        B = tf.tanh(B_raw) * 0.5  # Bounded to [-0.5, 0.5]
-        
-        return A, lambda_param, B
+        return coeffs
     
     def build(self, input_shape):
-        # Build sublayers with the correct input shape
-        # input_shape can be list or tuple, normalize to tuple
         input_shape = tuple(input_shape) if isinstance(input_shape, list) else input_shape
         self.conv1.build(input_shape)
-        conv1_output_shape = input_shape[:-1] + (self.hidden_units,)
-        self.conv2.build(conv1_output_shape)
-        self.conv_A.build(conv1_output_shape)
-        self.conv_lambda.build(conv1_output_shape)
-        self.conv_B.build(conv1_output_shape)
+        conv1_out = input_shape[:-1] + (self.hidden_units,)
+        self.conv2.build(conv1_out)
+        self.conv_coeffs.build(conv1_out)
         super().build(input_shape)
     
     def get_config(self):
         config = super().get_config()
         config.update({
             "n_bands": self.n_bands,
+            "n_harmonics": self.n_harmonics,
             "hidden_units": self.hidden_units,
             "noise_stddev": self.noise_stddev,
         })
@@ -193,253 +163,80 @@ class RegressionParameterHead(layers.Layer):
 
 
 @keras.utils.register_keras_serializable(package="EOModel")
-class WeatherTimeAdjustmentMLP(layers.Layer):
+class FourierSynthesisLayer(layers.Layer):
     """
-    MLP that produces time-varying adjustment factors from weather and temporal inputs.
+    Synthesises temporal delta sequence from Fourier coefficients via matrix multiply.
     
-    Takes temporal metadata and weather sequence, processes through MLP, and
-    outputs per-timestep adjustment multipliers for the growth rate.
+    Precomputes the Fourier design matrix Φ of shape (T, 2K):
+        Φ[t, 2k]   = cos((k+1) · ω · t)
+        Φ[t, 2k+1] = sin((k+1) · ω · t)
+    where ω = 2π / cycle_length.
     
-    :param output_steps: Number of output timesteps (default 20).
+    :param output_steps: Number of forecast timesteps T (default 20).
     :type output_steps: int
-    :param hidden_units: Hidden units in MLP layers.
-    :type hidden_units: int
+    :param n_harmonics: Number of Fourier harmonics K (default 3).
+    :type n_harmonics: int
+    :param cycle_length: Length of annual cycle in time steps (default 73).
+    :type cycle_length: int
     """
-    def __init__(self, output_steps=20, hidden_units=64, **kwargs):
+    def __init__(self, output_steps=20, n_harmonics=3, cycle_length=73, **kwargs):
         super().__init__(**kwargs)
         self.output_steps = output_steps
-        self.hidden_units = hidden_units
+        self.n_harmonics = n_harmonics
+        self.n_coeffs = 2 * n_harmonics
+        self.cycle_length = cycle_length
         
-        # Temporal metadata encoder
-        self.temporal_dense = layers.Dense(
-            hidden_units,
-            activation='relu',
-            kernel_regularizer=regularizers.l2(1e-5),
-            name='temporal_encode'
-        )
-        
-        # Weather sequence encoder (process each timestep)
-        self.weather_dense1 = layers.Dense(
-            hidden_units,
-            activation='relu',
-            kernel_regularizer=regularizers.l2(1e-5),
-            name='weather_encode1'
-        )
-        self.weather_dense2 = layers.Dense(
-            hidden_units // 2,
-            activation='relu',
-            kernel_regularizer=regularizers.l2(1e-5),
-            name='weather_encode2'
-        )
-        
-        # Fusion and output
-        self.fusion_dense = layers.Dense(
-            hidden_units,
-            activation='relu',
-            kernel_regularizer=regularizers.l2(1e-5),
-            name='fusion'
-        )
-        
-        # Output: adjustment per timestep (multiplicative factor around 1.0)
-        self.output_dense = layers.Dense(
-            output_steps,
-            activation='sigmoid',  # Output in [0, 1], will be scaled to [0.5, 1.5]
-            kernel_regularizer=regularizers.l2(1e-5),
-            name='adjustment_output'
-        )
+        # Build the constant Fourier design matrix Φ (T, 2K)
+        self._design_matrix = self._build_design_matrix()
     
-    def call(self, inputs):
+    def _build_design_matrix(self):
+        """Build constant Fourier basis matrix Φ of shape (T, 2K)."""
+        import numpy as np
+        T = self.output_steps
+        K = self.n_harmonics
+        # Use annual cycle length for frequency base
+        omega = 2.0 * np.pi / self.cycle_length
+        
+        # Time indices normalised: 1, 2, ..., T
+        t = np.arange(1, T + 1, dtype=np.float32)  # (T,)
+        
+        phi = np.zeros((T, 2 * K), dtype=np.float32)
+        for k in range(K):
+            freq = (k + 1) * omega
+            phi[:, 2 * k]     = np.cos(freq * t)
+            phi[:, 2 * k + 1] = np.sin(freq * t)
+        
+        return tf.constant(phi, dtype=tf.float32)  # (T, 2K)
+    
+    def call(self, coeffs):
         """
         Args:
-            inputs: List of [temporal_metadata, weather_sequence]
-                - temporal_metadata: (Batch, 3) - Year, Cos_DOY, Sin_DOY
-                - weather_sequence: (Batch, output_steps, 21) - Weather per step
+            coeffs: (B, H, W, n_bands, 2K) base Fourier coefficients
         
         Returns:
-            adjustment: (Batch, output_steps) - Multiplicative adjustment factors [0.5, 1.5]
+            deltas: (B, T, H, W, n_bands)
         """
-        temporal, weather = inputs
+        # coeffs: (B, H, W, bands, 2K) -> (B, 1, H, W, bands, 2K)
+        coeffs = tf.expand_dims(coeffs, axis=1)
         
-        # Encode temporal (Batch, hidden_units)
-        temporal_enc = self.temporal_dense(temporal)
+        # Fourier design matrix: (T, 2K) -> (1, T, 1, 1, 1, 2K)
+        phi = tf.reshape(self._design_matrix,
+                         [1, self.output_steps, 1, 1, 1, self.n_coeffs])
         
-        # Encode weather: (Batch, output_steps, 21) -> (Batch, output_steps, hidden/2)
-        weather_enc = self.weather_dense1(weather)
-        weather_enc = self.weather_dense2(weather_enc)
-        
-        # Aggregate weather across time: (Batch, hidden/2)
-        weather_agg = tf.reduce_mean(weather_enc, axis=1)
-        
-        # Fuse temporal and weather
-        fused = tf.concat([temporal_enc, weather_agg], axis=-1)
-        fused = self.fusion_dense(fused)
-        
-        # Output adjustment factors
-        raw_adj = self.output_dense(fused)  # (Batch, output_steps) in [0, 1]
-        
-        # Scale to [0.5, 1.5] to allow both slowdown and speedup
-        adjustment = raw_adj + 0.5
-        
-        return adjustment
-    
-    def build(self, input_shape):
-        # input_shape is a list: [temporal_shape, weather_shape]
-        temporal_shape = tuple(input_shape[0]) if isinstance(input_shape[0], list) else input_shape[0]
-        weather_shape = tuple(input_shape[1]) if isinstance(input_shape[1], list) else input_shape[1]
-        self.temporal_dense.build(temporal_shape)
-        self.weather_dense1.build(weather_shape)
-        weather_inter_shape = weather_shape[:-1] + (self.hidden_units,)
-        self.weather_dense2.build(weather_inter_shape)
-        # Fusion input: hidden_units + hidden_units//2
-        fusion_input_shape = (temporal_shape[0], self.hidden_units + self.hidden_units // 2)
-        self.fusion_dense.build(fusion_input_shape)
-        fusion_output_shape = (temporal_shape[0], self.hidden_units)
-        self.output_dense.build(fusion_output_shape)
-        super().build(input_shape)
-    
-    def get_config(self):
-        config = super().get_config()
-        config.update({
-            "output_steps": self.output_steps,
-            "hidden_units": self.hidden_units,
-        })
-        return config
-
-
-@keras.utils.register_keras_serializable(package="EOModel")
-class GrowthCurveLayer(layers.Layer):
-    """
-    Computes temporal delta sequence from growth curve parameters with adjustment.
-    
-    Given parameters A, λ, B per pixel per band, and time adjustment factors,
-    computes: δ(t) = A · (1 - exp(-λ · t · adj(t))) + B
-    
-    :param output_steps: Number of timesteps to generate (default 20).
-    :type output_steps: int
-    """
-    def __init__(self, output_steps=20, **kwargs):
-        super().__init__(**kwargs)
-        self.output_steps = output_steps
-    
-    def call(self, inputs):
-        """
-        Args:
-            inputs: Tuple of (A, lambda_param, B, adjustment)
-                - A: (Batch, H, W, Bands) - Amplitude
-                - lambda_param: (Batch, H, W, Bands) - Growth rate (> 0)
-                - B: (Batch, H, W, Bands) - Offset
-                - adjustment: (Batch, output_steps) - Time adjustment factors
-        
-        Returns:
-            deltas: (Batch, output_steps, H, W, Bands)
-        """
-        A, lambda_param, B, adjustment = inputs
-        
-        # Create time vector normalized to [0, 1]
-        t = tf.linspace(0.0, 1.0, self.output_steps)  # (output_steps,)
-        
-        # Reshape for broadcasting: (1, output_steps, 1, 1, 1)
-        t = tf.reshape(t, [1, self.output_steps, 1, 1, 1])
-        
-        # Reshape adjustment: (Batch, output_steps) -> (Batch, output_steps, 1, 1, 1)
-        adj = tf.reshape(adjustment, [-1, self.output_steps, 1, 1, 1])
-        
-        # Expand parameters: (Batch, H, W, Bands) -> (Batch, 1, H, W, Bands)
-        A = tf.expand_dims(A, axis=1)
-        lambda_param = tf.expand_dims(lambda_param, axis=1)
-        B = tf.expand_dims(B, axis=1)
-        
-        # Growth curve formula with adjustment
-        # δ(t) = A · (1 - exp(-λ · output_steps · t · adj)) + B
-        effective_time = self.output_steps * t * adj
-        deltas = A * (1.0 - tf.exp(-lambda_param * effective_time)) + B
+        # Synthesis via element-wise multiply + sum over coefficients
+        # δ(b,t,h,w,band) = Σ_j coeffs(b,t,h,w,band,j) · Φ(t,j)
+        deltas = tf.reduce_sum(coeffs * phi, axis=-1)
+        # Shape: (B, T, H, W, n_bands)
         
         return deltas
     
     def get_config(self):
         config = super().get_config()
-        config.update({"output_steps": self.output_steps})
-        return config
-
-
-@keras.utils.register_keras_serializable(package="EOModel")
-class SpatialSmoothingLayer(layers.Layer):
-    """
-    Applies learnable spatial smoothing to prevent sharp discontinuities.
-    
-    Uses depthwise separable convolution with small kernel for efficiency.
-    Smoothing is applied per-timestep independently.
-    
-    :param kernel_size: Size of smoothing kernel (default 3).
-    :type kernel_size: int
-    """
-    def __init__(self, kernel_size=3, **kwargs):
-        super().__init__(**kwargs)
-        self.kernel_size = kernel_size
-        
-        # Depthwise convolution for per-channel smoothing
-        self.smooth_conv = layers.DepthwiseConv2D(
-            kernel_size=(kernel_size, kernel_size),
-            padding='same',
-            use_bias=False,
-            depthwise_initializer='ones',  # Start as identity-like
-            depthwise_regularizer=regularizers.l2(1e-5),
-            name='smooth_depthwise'
-        )
-        
-        # Residual weight: blend between smoothed and original
-        self.alpha = self.add_weight(
-            name='smooth_alpha',
-            shape=(1,),
-            initializer=keras.initializers.Constant(0.1),
-            trainable=True
-        )
-    
-    def call(self, inputs):
-        """
-        Args:
-            inputs: (Batch, Time, H, W, Bands)
-        
-        Returns:
-            smoothed: (Batch, Time, H, W, Bands)
-        """
-        batch_size = tf.shape(inputs)[0]
-        time_steps = tf.shape(inputs)[1]
-        h = tf.shape(inputs)[2]
-        w = tf.shape(inputs)[3]
-        bands = inputs.shape[-1] or tf.shape(inputs)[-1]
-        
-        # Reshape to (Batch * Time, H, W, Bands) for Conv2D
-        x = tf.reshape(inputs, [-1, h, w, bands])
-        
-        # Apply smoothing
-        smoothed = self.smooth_conv(x)
-        
-        # Normalize by kernel area (approximate averaging)
-        kernel_area = float(self.kernel_size * self.kernel_size)
-        smoothed = smoothed / kernel_area
-        
-        # Residual blend: output = (1-α) * original + α * smoothed
-        alpha_clipped = tf.clip_by_value(self.alpha, 0.0, 1.0)
-        output = (1.0 - alpha_clipped) * x + alpha_clipped * smoothed
-        
-        # Reshape back to (Batch, Time, H, W, Bands)
-        output = tf.reshape(output, [batch_size, time_steps, h, w, bands])
-        
-        return output
-    
-    def build(self, input_shape):
-        # input_shape: (Batch, Time, H, W, Bands)
-        # Build depthwise conv for the spatial dimensions
-        input_shape = tuple(input_shape) if isinstance(input_shape, list) else input_shape
-        bands = input_shape[-1]
-        spatial_shape = (input_shape[0], input_shape[2], input_shape[3], bands)
-        self.smooth_conv.build(spatial_shape)
-        super().build(input_shape)
-    
-    def get_config(self):
-        config = super().get_config()
-        config.update({"kernel_size": self.kernel_size})
+        config.update({
+            "output_steps": self.output_steps,
+            "n_harmonics": self.n_harmonics,
+            "cycle_length": self.cycle_length,
+        })
         return config
 
 
@@ -450,17 +247,18 @@ def build_eo_convlstm_model(
         temporal_shape=(3,),
         weather_shape=(20, 21),
         output_shape=(20, 128, 128, 4),
+        n_harmonics=6,
+        cycle_length=73,
     ):
     """
-    Constructs a Growth Curve Regression model for Satellite Imagery Forecasting.
+    Constructs a Fourier Harmonics Regression model for Satellite Imagery Forecasting.
 
     Architecture:
     1. Apply cloudmask once to gate inputs
     2. Encode reflectancy + landcover through stacked ConvLSTM to latent space
-    3. Predict regression parameters (A, λ, B) from latent embedding
-    4. Generate weather/time adjustment factors via MLP
-    5. Compute growth curves with adjustment
-    6. Apply spatial smoothing
+    3. Predict Fourier coefficients (a_k, b_k) from latent embedding
+    4. Generate per-step FiLM modulation (γ, β) from weather + DOY
+    5. Synthesise temporal deltas via Fourier basis matrix multiply
 
     :param input_shape: Shape of input image sequence (Time, H, W, C).
     :type input_shape: tuple
@@ -474,6 +272,10 @@ def build_eo_convlstm_model(
     :type weather_shape: tuple
     :param output_shape: Shape of output sequence (Time, H, W, C).
     :type output_shape: tuple
+    :param n_harmonics: Number of Fourier harmonics K (default 3).
+    :type n_harmonics: int
+    :param cycle_length: Length of annual cycle in time steps (default 73).
+    :type cycle_length: int
     :return: A Keras Model instance.
     :rtype: keras.models.Model
     """
@@ -497,17 +299,16 @@ def build_eo_convlstm_model(
     x = CloudAwareGatingLayer(name='cloud_gating')([x, cloudmask_input])
 
     # --- Latent Space Encoder (ConvLSTM stack) ---
-    # Extract spatiotemporal features, output is latent embedding per pixel
     enc1 = layers.ConvLSTM2D(
         filters=32, kernel_size=(3, 3), padding='same',
-        dropout=0.15, recurrent_dropout=0.1,
+        dropout=0.3, recurrent_dropout=0.2,
         return_sequences=True, name='encoder_lstm1'
     )(x)
     enc1 = layers.GroupNormalization(groups=4, axis=-1, name='encoder_norm1')(enc1)
     
     enc2 = layers.ConvLSTM2D(
         filters=48, kernel_size=(3, 3), padding='same',
-        dropout=0.15, recurrent_dropout=0.1,
+        dropout=0.3, recurrent_dropout=0.2,
         return_sequences=True, name='encoder_lstm2'
     )(enc1)
     enc2 = layers.GroupNormalization(groups=4, axis=-1, name='encoder_norm2')(enc2)
@@ -515,7 +316,7 @@ def build_eo_convlstm_model(
     # Final encoder: reduce to single hidden state (latent embedding)
     latent = layers.ConvLSTM2D(
         filters=64, kernel_size=(3, 3), padding='same',
-        dropout=0.15, recurrent_dropout=0.1,
+        dropout=0.3, recurrent_dropout=0.2,
         return_sequences=False, name='encoder_lstm3'
     )(enc2)
     latent = layers.GroupNormalization(groups=4, axis=-1, name='latent_norm')(latent)
@@ -524,42 +325,45 @@ def build_eo_convlstm_model(
     # --- Skip Connection: Extract last timestep from intermediate encoder ---
     skip = LastTimestepLayer(name='skip_last')(enc2)  # (Batch, H, W, 48)
     
-    # --- Fuse latent with skip for richer features ---
-    latent_fused = layers.Concatenate(axis=-1, name='latent_skip_concat')([latent, skip])
-    # Shape: (Batch, H, W, 64 + 48) = (Batch, H, W, 112)
+    # --- Context encoding (Weather + Temporal) ---
+    weather_flat = layers.Flatten(name='weather_flatten')(weather_input)
+    weather_enc = layers.Dense(32, activation='relu', kernel_regularizer=regularizers.l2(1e-4), name='weather_enc')(weather_flat)
+    temporal_enc = layers.Dense(16, activation='relu', kernel_regularizer=regularizers.l2(1e-4), name='temporal_enc')(temporal_input)
+    context = layers.Concatenate(name='context_concat')([weather_enc, temporal_enc])
     
-    # --- Regression Parameter Head ---
+    # Broadcast context to spatial dimensions (Batch, 1, 1, 48) -> (Batch, H, W, 48)
+    context_reshaped = layers.Reshape((1, 1, 48), name='context_reshape')(context)
+    context_tiled = layers.UpSampling2D(size=(input_shape[1], input_shape[2]), name='context_tile')(context_reshaped)
+    
+    # --- Fuse latent with skip and context for richer features ---
+    latent_fused = layers.Concatenate(axis=-1, name='latent_skip_context_concat')([latent, skip, context_tiled])
+    
+    # --- Fourier Coefficient Head ---
     n_bands = output_shape[-1]
     output_steps = output_shape[0]
     
-    A, lambda_param, B = RegressionParameterHead(
+    coefficients = FourierCoefficientHead(
         n_bands=n_bands,
+        n_harmonics=n_harmonics,
         hidden_units=64,
-        name='regression_head'
+        name='fourier_head'
     )(latent_fused)
-    # Each: (Batch, H, W, n_bands)
+    # Shape: (Batch, H, W, n_bands, 2K)
     
-    # --- Weather/Time Adjustment MLP ---
-    adjustment = WeatherTimeAdjustmentMLP(
+    # --- Fourier Synthesis ---
+    outputs_raw = FourierSynthesisLayer(
         output_steps=output_steps,
-        hidden_units=64,
-        name='weather_time_mlp'
-    )([temporal_input, weather_input])
-    # Shape: (Batch, output_steps)
-    
-    # --- Growth Curve Layer ---
-    deltas = GrowthCurveLayer(
-        output_steps=output_steps,
-        name='growth_curve'
-    )([A, lambda_param, B, adjustment])
+        n_harmonics=n_harmonics,
+        cycle_length=cycle_length,
+        name='fourier_synthesis'
+    )(coefficients)
     # Shape: (Batch, output_steps, H, W, n_bands)
     
-    # --- Spatial Smoothing ---
-    outputs = SpatialSmoothingLayer(
-        kernel_size=3,
-        name='spatial_smoothing'
-    )(deltas)
-    # Shape: (Batch, output_steps, H, W, n_bands)
+    # No final activation — coefficients are scaled by a learnable factor
+    # inside FourierCoefficientHead, with amplitude controlled by L2
+    # regularization on conv layers. Previous softsign bounding caused
+    # systematic under-prediction of large deltas.
+    outputs = outputs_raw
 
     model = models.Model(
         inputs=[
@@ -603,10 +407,8 @@ def load_model(model_path: str, compile: bool = True) -> keras.Model:
     custom_objects = {
         'CloudAwareGatingLayer': CloudAwareGatingLayer,
         'LastTimestepLayer': LastTimestepLayer,
-        'RegressionParameterHead': RegressionParameterHead,
-        'WeatherTimeAdjustmentMLP': WeatherTimeAdjustmentMLP,
-        'GrowthCurveLayer': GrowthCurveLayer,
-        'SpatialSmoothingLayer': SpatialSmoothingLayer,
+        'FourierCoefficientHead': FourierCoefficientHead,
+        'FourierSynthesisLayer': FourierSynthesisLayer,
     }
     
     model = keras.models.load_model(
