@@ -17,10 +17,10 @@ def adapt_inputs(x, y):
     t_meta = x['time'][:, -1, :]
     x_new = {
         'sentinel2_sequence': x['sentinel2'],
-        'cloudmask_sequence': x['cloudmask'],
         'landcover_map': x['landcover'],
         'weather_sequence': x['weather'],
-        'temporal_metadata': t_meta
+        'temporal_metadata': t_meta,
+        'target_start_doy': x['target_start_doy']
     }
     return x_new, y
 

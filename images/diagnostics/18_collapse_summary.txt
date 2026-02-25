@@ -1,0 +1,69 @@
+======================================================================
+  MODE COLLAPSE PARAMETER ANALYSIS REPORT
+======================================================================
+
+1. GRADIENT FLOW
+   Proxy regression loss (MAE on clear pixels): 0.06283
+   Dead layers (grad norm < 1e-5): 0
+   Weak layers (grad norm < 1e-3): 0
+
+2. FOURIER COEFFICIENT HEALTH
+   Harmonic k=1: a_std=0.0575, b_std=0.0165, mean_amplitude=0.0600  [OK]
+   Harmonic k=2: a_std=0.0178, b_std=0.0139, mean_amplitude=0.0216  [OK]
+   Harmonic k=3: a_std=0.0132, b_std=0.0054, mean_amplitude=0.0207  [OK]
+   Harmonic k=4: a_std=0.0053, b_std=0.0128, mean_amplitude=0.0158  [OK]
+   Harmonic k=5: a_std=0.0095, b_std=0.0048, mean_amplitude=0.0107  [OK]
+   Harmonic k=6: a_std=0.0085, b_std=0.0056, mean_amplitude=0.0089  [NEAR-ZERO]
+
+3. MODE COLLAPSE INDICATORS
+   Prediction std / Target std: 0.2042  (1.0 = good, << 1.0 = collapsed)
+   Mean prediction std: 0.11561
+   Mean target std:     0.56614
+   Band 0 diversity ratio: 0.1596
+   Band 1 diversity ratio: 0.1714
+   Band 2 diversity ratio: 0.2022
+   Band 3 diversity ratio: 0.3225
+
+4. L2 REGULARIZATION vs REGRESSION LOSS
+   Raw regression loss (log-cosh): 0.004597
+   Weighted regression (×5.0):     0.022987
+   Total L2 regularization:        0.000000
+   L2/Regression ratio:            0.0000  (OK)
+
+5. kNDVI AUXILIARY LOSS (DEAD CODE)
+   Mean kNDVI loss if active: 0.07234
+   Status: kNDVI computation is MISSING from ImprovedkNDVILoss.call()
+   The kndvi_weight tf.Variable is never referenced in call().
+
+6. CLOUD COVER
+   Input cloud fraction: N/A (encoder uses BAP-filled sequences, no cloudmask input)
+   Mean target clear-sky fraction: 0.551
+
+======================================================================
+  ROOT CAUSES (in priority order)
+======================================================================
+
+  [BUG-1] kNDVI auxiliary loss is dead code in ImprovedkNDVILoss.call().
+          The kNDVI computation block is missing from the call() method.
+          FIX: Add kNDVI loss computation and apply kndvi_weight in call().
+
+  [BUG-2] L2 regularization on all FourierCoefficientHead conv layers
+          drives Fourier coefficients toward zero (mode collapse).
+          FIX: Remove L2 from FourierCoefficientHead or reduce lambda to 1e-6.
+
+  [ARCH-1] No DC offset in Fourier representation.
+           Cannot represent sustained trends (monotonic increase/decrease).
+           FIX: Add a learnable bias per pixel per band as a DC term.
+
+  [ARCH-2] CloudAwareGating zeros BAP-filled values for cloudy timesteps,
+           making the encoder input very sparse when cloud cover is high.
+           FIX: Apply gating only to S2 channels, not to landcover.
+           Or use the BAP-filled inputs without gating (BAP is already clean).
+
+  [ARCH-3] Weather features collapsed to a single global context vector.
+           Per-timestep weather anomalies cannot modulate per-step predictions.
+           FIX: Use weather as per-timestep additive correction on output.
+
+  [TRAIN-1] gradient clipnorm=1.0 may be too aggressive for a 3-layer
+            ConvLSTM. Signals may not reach the first encoder layer.
+            FIX: Increase clipnorm to 5.0 or use clipvalue instead.

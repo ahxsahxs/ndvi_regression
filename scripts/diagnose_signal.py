@@ -75,10 +75,10 @@ def adapt_inputs(x, y):
     t_meta = x["time"][:, -1, :]
     x_new = {
         "sentinel2_sequence": x["sentinel2"],
-        "cloudmask_sequence": x["cloudmask"],
         "landcover_map": x["landcover"],
         "temporal_metadata": t_meta,
         "weather_sequence": x["weather"],
+        "target_start_doy": x["target_start_doy"],
     }
     return x_new, y
 
@@ -518,6 +518,31 @@ def write_summary(mae_per_step, amp_stats, coeff_stats, slope_info, save_dir):
 # Main
 # ---------------------------------------------------------------------------
 
+def diagnose(model, generator, split="val_chopped", max_samples=30):
+    """Run signal diagnostics with a pre-loaded model and generator."""
+    os.makedirs(DIAG_DIR, exist_ok=True)
+
+    dataset = generator.get_dataset()
+    dataset = dataset.batch(1).map(adapt_inputs, num_parallel_calls=tf.data.AUTOTUNE)
+    dataset = dataset.prefetch(tf.data.AUTOTUNE)
+
+    print(f"\nRunning inference (max {max_samples} samples) ...")
+    true_d, pred_d, masks, lcs = collect_predictions(model, dataset, max_samples)
+    print(f"  Collected: {true_d.shape[0]} samples, shape={true_d.shape}")
+
+    print("\nGenerating diagnostic plots ...")
+    mae_per_step = plot_error_vs_time(true_d, pred_d, masks, lcs, DIAG_DIR)
+    amp_stats = plot_amplitude_histogram(true_d, pred_d, masks, DIAG_DIR)
+    coeff_stats = plot_coefficient_analysis(model, DIAG_DIR)
+    slope_info = plot_per_band_scatter(true_d, pred_d, masks, DIAG_DIR)
+    plot_loss_gradient_analysis(DIAG_DIR)
+
+    print("\nWriting summary report ...")
+    write_summary(mae_per_step, amp_stats, coeff_stats, slope_info, DIAG_DIR)
+
+    print("\nAll diagnostics saved to:", DIAG_DIR)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Diagnose weak delta signal strength.")
     parser.add_argument("--split", type=str, default="val_chopped",
@@ -545,28 +570,8 @@ def main():
     data_path = VALIDATION_PATH if args.split in ("val_chopped", "val") else DATASET_PATH
     print(f"Loading dataset from {data_path} (split={args.split}) ...")
     generator = DatasetGenerator(data_path)
-    dataset = generator.get_dataset()
-    dataset = dataset.batch(1).map(adapt_inputs, num_parallel_calls=tf.data.AUTOTUNE)
-    dataset = dataset.prefetch(tf.data.AUTOTUNE)
-    print(f"  Files: {len(generator.files)}")
 
-    # --- Collect predictions ---
-    print(f"\nRunning inference (max {args.max_samples} samples) ...")
-    true_d, pred_d, masks, lcs = collect_predictions(model, dataset, args.max_samples)
-    print(f"  Collected: {true_d.shape[0]} samples, shape={true_d.shape}")
-
-    # --- Run analyses ---
-    print("\nGenerating diagnostic plots ...")
-
-    mae_per_step = plot_error_vs_time(true_d, pred_d, masks, lcs, DIAG_DIR)
-    amp_stats = plot_amplitude_histogram(true_d, pred_d, masks, DIAG_DIR)
-    coeff_stats = plot_coefficient_analysis(model, DIAG_DIR)
-    slope_info = plot_per_band_scatter(true_d, pred_d, masks, DIAG_DIR)
-    plot_loss_gradient_analysis(DIAG_DIR)
-
-    # --- Write summary ---
-    print("\nWriting summary report ...")
-    write_summary(mae_per_step, amp_stats, coeff_stats, slope_info, DIAG_DIR)
+    diagnose(model, generator, split=args.split, max_samples=args.max_samples)
 
     print("\n✅ All diagnostics saved to:", DIAG_DIR)
 

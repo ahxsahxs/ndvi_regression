@@ -46,22 +46,48 @@ def step_1_visualize(model, val_generator, split, **_):
         model=model,
         generator=val_generator,
     )
-    print("[1/2] Saved prediction visualizations.")
+    print("[1/4] Saved prediction visualizations.")
 
 
 def step_2_earthnet(model, val_generator, split, max_samples, **_):
-    """[2/2] EarthNet Comparison (Vegetation Score via earthnet toolkit)."""
+    """[2/4] EarthNet Comparison (Vegetation Score via earthnet toolkit)."""
     from score_earthnet import score_predictions
     score_predictions(
         split=split
     )
-    print(f"[2/2] Generated comparison/")
+    print(f"[2/4] Generated comparison/")
+
+
+def step_3_diagnose(model, val_generator, split, max_samples, **_):
+    """[3/4] Signal Diagnostics (error vs time, amplitude, coefficients, scatter)."""
+    from diagnose_signal import diagnose
+    diagnose(
+        model=model,
+        generator=val_generator,
+        split=split,
+        max_samples=max_samples or 30,
+    )
+    print("[3/4] Saved signal diagnostics.")
+
+
+def step_4_parameter_analysis(model, val_generator, split, max_samples, **_):
+    """[4/4] Parameter Analysis (gradient norms, harmonic coefficients, diversity)."""
+    from parameter_analysis import analyze_parameters
+    analyze_parameters(
+        model=model,
+        generator=val_generator,
+        split=split,
+        max_samples=max_samples or 20,
+    )
+    print("[4/4] Saved parameter analysis.")
 
 
 # Ordered step registry
 ALL_STEPS = {
     1: ("Prediction Visualization", step_1_visualize),
     2: ("EarthNet Comparison",      step_2_earthnet),
+    3: ("Signal Diagnostics",       step_3_diagnose),
+    4: ("Parameter Analysis",       step_4_parameter_analysis),
 }
 
 

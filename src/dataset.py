@@ -73,8 +73,50 @@ class DatasetGenerator:
             f"but dataset contains: {list(dataset.data_vars)}"
         )
 
+    def _compute_global_normalization(
+            self, dataset: xr.Dataset
+        ) -> tuple[float, float]:
+        """
+        Computes normalization parameters from ALL S2 bands across ALL timesteps.
+
+        This ensures input and target slices share the same scale, producing
+        physically meaningful deltas.
+
+        :param dataset: xarray Dataset containing satellite data.
+        :type dataset: xr.Dataset
+        :return: Tuple of (global_min, global_max) across all bands and times.
+        :rtype: tuple[float, float]
+        """
+        mask_var = self._resolve_mask_var(dataset)
+        mask = dataset[mask_var].values > 0 # (T, H, W)
+        
+        global_min = np.inf
+        global_max = -np.inf
+        
+        for band in self.S2_BANDS:
+            vals = dataset[band].values  # All timesteps
+            # Exclude NaN AND cloudy pixels for accurate statistics
+            valid_mask = ~np.isnan(vals) & ~mask
+            valid = vals[valid_mask]
+            if len(valid) > 0:
+                # Use percentiles for robustness instead of absolute min/max
+                # Since vegetation targets shouldn't be affected by occasional bright anomalies
+                p2 = float(np.percentile(valid, 2))
+                p98 = float(np.percentile(valid, 98))
+                
+                global_min = min(global_min, p2)
+                global_max = max(global_max, p98)
+        
+        if global_min == np.inf:
+            global_min, global_max = 0.0, 1.0
+        elif global_min == global_max:
+            global_max = global_min + 1.0 # arbitrary denom of 1.0
+            
+        return global_min, global_max
+
     def prepare_sentinel_for_slice(
-            self, dataset: xr.Dataset, time_slice: slice
+            self, dataset: xr.Dataset, time_slice: slice,
+            norm_params: tuple[float, float] | None = None
         ) -> tuple[np.ndarray, np.ndarray]:
         """
         Extracts Sentinel-2 bands and cloud mask for a time slice.
@@ -83,6 +125,9 @@ class DatasetGenerator:
         :type dataset: xr.Dataset
         :param time_slice: Slice object specifying time range.
         :type time_slice: slice
+        :param norm_params: Tuple of (global_min, global_max) for consistent
+                           normalization. If None, computed from this slice only.
+        :type norm_params: tuple[float, float] | None
         :return: Tuple of (sentinel2, cloudmask) arrays.
                  sentinel2: (T, H, W, 4) reflectance values.
                  cloudmask: (T, H, W, 1) where 1=cloudy/invalid.
@@ -106,9 +151,13 @@ class DatasetGenerator:
         s2_mask = np.maximum(s2_mask, s2_nans.astype(np.float32))
         sentinel2 = np.nan_to_num(sentinel2, nan=0)
 
-        # Global normalization preserving inter-temporal relationships
-        global_min = np.min(sentinel2)
-        global_max = np.max(sentinel2)
+        # Normalization: use provided params or compute from this slice
+        if norm_params is not None:
+            global_min, global_max = norm_params
+        else:
+            global_min = np.min(sentinel2)
+            global_max = np.max(sentinel2)
+        
         denom = global_max - global_min
         if denom > 0:
             sentinel2 = (sentinel2 - global_min) / denom
@@ -117,18 +166,22 @@ class DatasetGenerator:
 
         return sentinel2, s2_mask
 
-    def prepare_x(self, dataset: xr.Dataset) -> dict:
+    def prepare_x(self, dataset: xr.Dataset,
+                  norm_params: tuple[float, float] | None = None) -> dict:
         """
         Prepares all input features for the model.
 
         :param dataset: xarray Dataset containing satellite and ancillary data.
         :type dataset: xr.Dataset
+        :param norm_params: Normalization parameters (global_min, global_max).
+        :type norm_params: tuple[float, float] | None
         :return: Dictionary with keys: 'time', 'sentinel2', 'cloudmask',
-                 'landcover', 'weather'.
+                 'landcover', 'weather', 'target_start_doy'.
         :rtype: dict
         """
         input_slice = slice(4, self.input_days, 5)
-        sentinel2, s2_mask = self.prepare_sentinel_for_slice(dataset, input_slice)
+        sentinel2, s2_mask = self.prepare_sentinel_for_slice(
+            dataset, input_slice, norm_params=norm_params)
         
         # Fill cloudy pixels with last clear observation
         sentinel2_bap = self.compute_bap_sequence(sentinel2, s2_mask)
@@ -150,12 +203,22 @@ class DatasetGenerator:
         
         weather_feats = self.prepare_weather(dataset)
         
+        # Target start DOY: first day of the target period, normalised to [0, 1].
+        # Use the actual days-in-year (366 for leap years) for consistency with
+        # the cyclic DOY encoding used in time_feats above.
+        target_start_time = pd.to_datetime(
+            dataset.time.isel(time=self.input_days + 4).values)
+        target_days_in_year = 366 if target_start_time.is_leap_year else 365
+        target_start_doy = np.array(
+            [target_start_time.day_of_year / target_days_in_year], dtype=np.float32)
+        
         return {
             "time": time_feats,
             "sentinel2": sentinel2_bap,
             "cloudmask": s2_mask,
             "landcover": esawc_lc,
-            "weather": weather_feats
+            "weather": weather_feats,
+            "target_start_doy": target_start_doy
         }
     
     def prepare_weather(self, dataset: xr.Dataset) -> np.ndarray:
@@ -304,7 +367,8 @@ class DatasetGenerator:
         bap_sequence = self.compute_bap_sequence(sentinel2, cloudmask)
         return bap_sequence[-1]
 
-    def prepare_y(self, last_img: np.ndarray, dataset: xr.Dataset) -> np.ndarray:
+    def prepare_y(self, last_img: np.ndarray, dataset: xr.Dataset,
+                  norm_params: tuple[float, float] | None = None) -> np.ndarray:
         """
         Prepares target output with mask, deltas, and BAP reference.
 
@@ -312,11 +376,15 @@ class DatasetGenerator:
         :type last_img: np.ndarray
         :param dataset: xarray Dataset containing target satellite data.
         :type dataset: xr.Dataset
+        :param norm_params: Normalization parameters (global_min, global_max), must
+                           match those used in prepare_x for consistent deltas.
+        :type norm_params: tuple[float, float] | None
         :return: Target array (T, H, W, 9) with [mask(1), deltas(4), BAP(4)].
         :rtype: np.ndarray
         """
         target_slice = slice(self.input_days + 4, self.input_days + self.target_days, 5)
-        sentinel2, s2_mask = self.prepare_sentinel_for_slice(dataset, target_slice)
+        sentinel2, s2_mask = self.prepare_sentinel_for_slice(
+            dataset, target_slice, norm_params=norm_params)
         
         # Tile BAP to match time dimension
         bap_tiled = np.tile(np.expand_dims(last_img, 0), (sentinel2.shape[0], 1, 1, 1))
@@ -337,9 +405,13 @@ class DatasetGenerator:
                     if len(ds.time) < self.input_days + self.target_days:
                         continue
 
-                    x = self.prepare_x(dataset=ds)
+                    # Compute normalization ONCE from all timesteps
+                    norm_params = self._compute_global_normalization(ds)
+
+                    x = self.prepare_x(dataset=ds, norm_params=norm_params)
                     last_img = self.compute_bap(x["sentinel2"], x["cloudmask"])
-                    y = self.prepare_y(last_img=last_img, dataset=ds)
+                    y = self.prepare_y(last_img=last_img, dataset=ds,
+                                       norm_params=norm_params)
 
                     yield x, y
 
@@ -365,6 +437,7 @@ class DatasetGenerator:
                 'cloudmask': tf.TensorSpec(shape=(actual_input_days, 128, 128, 1), dtype=tf.float32),
                 'landcover': tf.TensorSpec(shape=(128, 128, 10), dtype=tf.float32),
                 'weather': tf.TensorSpec(shape=(actual_target_days, n_weather_features), dtype=tf.float32),
+                'target_start_doy': tf.TensorSpec(shape=(1,), dtype=tf.float32),
             },
             tf.TensorSpec(shape=(actual_target_days, 128, 128, 9), dtype=tf.float32)
         )

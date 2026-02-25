@@ -94,10 +94,10 @@ def score_predictions(model_epoch=None, split='val_chopped', limit=None):
                 t_meta = x_batch['time'][:, -1, :]
                 x_new = {
                     'sentinel2_sequence': x_batch['sentinel2'],
-                    'cloudmask_sequence': x_batch['cloudmask'],
                     'landcover_map': x_batch['landcover'],
                     'weather_sequence': x_batch['weather'],
-                    'temporal_metadata': t_meta
+                    'temporal_metadata': t_meta,
+                    'target_start_doy': x_batch['target_start_doy']
                 }
                 
                 y_pred = model.predict(x_new, verbose=0)
