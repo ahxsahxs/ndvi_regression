@@ -84,11 +84,13 @@ tensorboard --logdir logs/
 ### Loss Function (`src/losses.py`)
 
 `DeltaRegressionLoss`:
-- **Log-Cosh regression** on masked (clear-sky only) reflectance deltas — primary objective
+- **Weighted log-cosh regression** on masked (clear-sky only) reflectance deltas — primary objective. Per-band weights `[1.0, 1.0, 1.5, 2.0]` (B02, B03, B04, B8A) correct the slope imbalance (NIR was most under-predicted at slope 0.601).
 - **Edge penalty** — preserves spatial structure
 - **Asymmetric under-prediction penalty** — scales loss by 1.5× when `|pred| < |true|`
+- **NDVI reconstruction loss** — penalises `|NDVI(BAP+pred) − NDVI(BAP+true)|` on clear pixels. Computed on full reflectance (BAP available in `y_true[..., 5:9]`) to avoid division-by-zero on small deltas. Constrains the NIR/Red inter-band ratio and fixes the purple colour bias.
+- **Batch diversity loss** — penalises `mean(ReLU(std_true − std_pred))` across the batch axis. Zero when predictions match or exceed target variability; positive when the model collapses toward the mean.
 
-Training defaults: `regression_weight=5.0`, `edge_weight=0.1`.
+Training defaults: `regression_weight=5.0`, `edge_weight=0.1`, `ndvi_weight=0.5`, `diversity_weight=0.5`, `band_weights=(1.0, 1.0, 1.5, 2.0)`.
 
 ### Training Pipeline (`src/train.py`)
 
@@ -104,3 +106,23 @@ Training defaults: `regression_weight=5.0`, `edge_weight=0.1`.
 - **Cloud masking in loss only**: The cloud mask (`y_true[..., 0:1]`) gates the regression loss — clear pixels only. The encoder receives the full BAP-filled sequence without spatial zeroing.
 - **`keras.ops` required in custom layers**: Using `tf.*` ops on KerasTensors during Keras 3 model construction breaks graph connectivity (`inputs not connected to outputs`). All `FourierSynthesisLayer` and `FourierCoefficientHead` ops use `keras.ops.*`.
 - **No L2 on decoder layers**: L2 on `FourierCoefficientHead` was driving coefficients to zero (mode collapse). AdamW's built-in weight decay is sufficient.
+- **Spectral balance loss uses true-reflectance denominator**: `(nir_pred − red_pred) / (nir_true + red_true + ε)`. The denominator has no dependency on model parameters so the gradient only flows through the numerator — no division-by-prediction explosion. This replaced the earlier NDVI ratio `(nir_pred − red_pred) / (nir_pred + red_pred + ε)` which caused NaN gradients when predicted reflectances were near zero.
+- **Diversity loss uses `sqrt(variance + eps)` not `reduce_std`**: `tf.math.reduce_std` gradient is `(x − mean) / (N · std)`. At batch_size=1, std=0 exactly, so the gradient is `0/0 = NaN`. TF's chain rule then computes `relu'(0) × NaN = NaN`. Using `sqrt(variance + 1e-8)` keeps the denominator finite at all times.
+
+## Changelog
+
+### 2026-02-25
+**Loss function overhaul (`src/losses.py`) — fixes colour bias and mode collapse**
+- **(A) Per-band regression weights** `[1.0, 1.0, 1.5, 2.0]`: replaced uniform band mean in log-cosh with a normalised weighted sum. NIR (slope 0.601) and Red (slope 0.761) were systematically under-predicted; higher weights increase their gradient pressure. Applied to both regression and edge penalty terms.
+- **(B) NDVI reconstruction loss** (`ndvi_weight=0.5`): adds `mean(|NDVI_pred − NDVI_true|)` on clear-sky pixels, where NDVI is computed from full reflectance `BAP + delta`. Directly constrains the NIR/Red inter-band ratio and addresses the purple colour tint observed in delta prediction images.
+- **(C) Batch diversity loss** (`diversity_weight=0.5`): adds `mean(ReLU(std_true − std_pred))` across the batch dimension. Fires only when cross-sample prediction variance collapses below target variance (diversity ratios were 0.16–0.32 across bands). Inactive at batch_size=1.
+
+**Loss function bug fixes (`src/losses.py`) — NaN during training**
+- **Root cause 1 — `tf.math.reduce_std` NaN gradient**: `reduce_std` computes `sqrt(variance)` whose backward pass is `(x − mean) / (N · std)`. At batch_size=1 (the default), `std = 0` exactly and the gradient is `0/0 = NaN`. TF's chain rule then evaluates `relu'(0) × NaN = 0 × NaN = NaN` (IEEE 754), corrupting all gradients. Fixed by replacing with `sqrt(reduce_variance + 1e-8)`.
+- **Root cause 2 — NDVI denominator gradient explosion**: `(nir_pred − red_pred) / (nir_pred + red_pred + ε)` has gradient `∂/∂nir_pred = 2·red_pred / (sum + ε)²`. With `ε=1e-6` and both bands near zero (common early in training), this reached ~500/pixel, causing NaN in the optimizer's internal accumulators before `clipnorm` could act. Fixed by using true-reflectance as denominator: `denom = nir_true + red_true + 1e-3` — zero model dependency, gradient bounded by `1/denom`.
+- **Root cause 3 — `log(cosh(x))` overflow (latent)**: `tf.math.cosh` hits float32-inf at `|x| > 88.7`, then `inf * 0` (cloudy mask) = NaN. Fixed with the stable identity `|x| + softplus(−2|x|) − log(2)`, which is finite for any finite input.
+- **Added `y_pred` NaN guard**: `tf.where(is_finite(y_pred), y_pred, 0)` at the top of `call()` prevents a single bad batch from corrupting optimizer state.
+
+**Analysis scripts**
+- `scripts/run_analysis.py`: added steps 3 (Signal Diagnostics) and 4 (Parameter Analysis) to the shared-resource runner. Scripts now expose callable entry points (`diagnose()`, `analyze_parameters()`) so the model and dataset are loaded only once.
+- `scripts/parameter_analysis.py`: `plot_cloud_cover_analysis` and `write_collapse_summary` updated to handle missing `cloudmask_sequence` input (removed with `CloudAwareGatingLayer`); input cloud panels replaced with an N/A annotation.

@@ -99,6 +99,9 @@ def train_bspline_model(
         loss = DeltaRegressionLoss(
             regression_weight=5.0,
             edge_weight=0.1,
+            ndvi_weight=1.0,
+            diversity_weight=0.5,
+            temporal_weight=0.1,
         )
         model.compile(optimizer=optimizer, loss=loss)
 
