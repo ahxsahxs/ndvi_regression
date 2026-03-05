@@ -9,20 +9,9 @@ import matplotlib.pyplot as plt
 from dataset import DatasetGenerator
 from build_model import load_model
 from config import DATASET_PATH, VALIDATION_PATH
+from adapt_inputs import adapt_inputs
 
 CHECKPOINTS_DIR = "/home/me/workspace/bspline_ndvi/checkpoints"
-
-def adapt_inputs(x, y):
-    # Same logic as train.py
-    t_meta = x['time'][:, -1, :]
-    x_new = {
-        'sentinel2_sequence': x['sentinel2'],
-        'landcover_map': x['landcover'],
-        'weather_sequence': x['weather'],
-        'temporal_metadata': t_meta,
-        'target_start_doy': x['target_start_doy']
-    }
-    return x_new, y
 
 def visualize(model_epoch=None, split='train', model=None, generator=None):
     """Visualize model predictions as target vs predicted reflectance images.

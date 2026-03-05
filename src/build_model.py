@@ -19,6 +19,35 @@ class CloudAwareGatingLayer(layers.Layer):
 
 
 @keras.utils.register_keras_serializable(package="EOModel")
+class LearnableScale(layers.Layer):
+    """
+    Multiplies input by a single learnable scalar, initialised to `init_value`.
+
+    Kept for backward compatibility when loading old checkpoints via load_model().
+    Not used in the current model architecture.
+    """
+    def __init__(self, init_value=0.05, **kwargs):
+        super().__init__(**kwargs)
+        self.init_value = init_value
+
+    def build(self, input_shape):
+        self.scale = self.add_weight(
+            name='scale', shape=(),
+            initializer=keras.initializers.Constant(self.init_value),
+            trainable=True
+        )
+        super().build(input_shape)
+
+    def call(self, inputs):
+        return inputs * self.scale
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({"init_value": self.init_value})
+        return config
+
+
+@keras.utils.register_keras_serializable(package="EOModel")
 class LastTimestepLayer(layers.Layer):
     """
     Extracts the last timestep from a sequence tensor.
@@ -43,11 +72,11 @@ class FourierCoefficientHead(layers.Layer):
     Output per pixel per band: [a_1, b_1, …, a_K, b_K]
     Shape: (B, H, W, n_bands, 2K)
 
-    No L2 regularisation on conv layers — AdamW weight_decay handles that.
-    coeff_scale initialised at 0.1 (not 1.0) so the model starts near-zero
-    and learns to grow, rather than collapsing from 1.0.
+    No L2 regularisation — AdamW weight_decay handles that.
+    No learnable coeff_scale — convolutions output at full scale so harmonics
+    are not suppressed relative to the DC offset path.
 
-    Note: DC offset is a separate Conv2D in build_eo_convlstm_model so this
+    DC offset is a separate Conv2D in build_eo_convlstm_model so this
     layer stays single-output (Keras 3 functional API cannot trace multi-tensor
     returns from custom layers).
     """
@@ -74,14 +103,6 @@ class FourierCoefficientHead(layers.Layer):
             padding='same', activation=None, name='fourier_coeffs'
         )
 
-        # Learnable amplitude scale — init at 0.1 so predictions start small
-        # and grow as the model learns, rather than collapsing from 1.0.
-        self.coeff_scale = self.add_weight(
-            name='coeff_scale', shape=(1, 1, 1, n_bands, self.n_coeffs),
-            initializer=keras.initializers.Constant(0.1),
-            trainable=True
-        )
-
     def call(self, latent, training=None):
         x = self.conv1(latent)
         x = self.conv2(x)
@@ -92,11 +113,10 @@ class FourierCoefficientHead(layers.Layer):
         # symbolic graph tracing; keras.ops.reshape preserves tensor connectivity.
         s = keras.ops.shape(raw)
         coeffs = keras.ops.reshape(raw, (s[0], s[1], s[2], self.n_bands, self.n_coeffs))
-        coeffs = coeffs * self.coeff_scale
 
         if training:
             coeffs = coeffs + tf.random.normal(
-                tf.shape(coeffs), stddev=self.noise_stddev)
+                tf.shape(coeffs), stddev=self.noise_stddev, dtype=coeffs.dtype)
 
         return coeffs
 
@@ -160,7 +180,7 @@ class FourierSynthesisLayer(layers.Layer):
         # Build step offsets as a Python list and convert once — never apply
         # tf.range / tf.cast directly on start_doy-derived tensors before this.
         step_values = [float((t + 1) * self.step_interval) for t in range(T)]
-        step_offsets = keras.ops.convert_to_tensor(step_values, dtype='float32')  # (T,)
+        step_offsets = keras.ops.convert_to_tensor(step_values, dtype=start_doy.dtype)  # (T,)
         step_offsets = keras.ops.reshape(step_offsets, (1, T))  # (1, T)
 
         doy_t = start_day + step_offsets  # (B, T) — broadcast
@@ -213,11 +233,11 @@ class FourierSynthesisLayer(layers.Layer):
 def build_eo_convlstm_model(
         input_shape=(10, 128, 128, 4),
         landcover_shape=(128, 128, 10),
-        temporal_shape=(3,),
+        temporal_shape=(10, 3),
         weather_shape=(20, 21),
         target_start_doy_shape=(1,),
         output_shape=(20, 128, 128, 4),
-        n_harmonics=6,
+        n_harmonics=4,
         cycle_length_days=365,
         step_interval=5,
 ):
@@ -225,20 +245,20 @@ def build_eo_convlstm_model(
     Constructs the Fourier Harmonics model for satellite reflectance forecasting.
 
     Architecture:
-    1. Encode BAP-filled Sentinel-2 + landcover through stacked ConvLSTM.
-    2. Fuse latent state with global weather/temporal context.
+    1. Encode BAP-filled Sentinel-2 + per-frame DOY through stacked ConvLSTM.
+    2. Fuse latent state with global weather/temporal context + landcover.
     3. Predict Fourier harmonic coefficients per pixel per band.
     4. Synthesise temporal deltas via DOY-conditioned Fourier basis.
-    5. Add DC offset (sustained trend) — separate Conv2D broadcast across time.
-    6. Add per-timestep weather residual — TimeDistributed Dense broadcast spatially.
+    5. Apply weather FiLM modulation to harmonics.
+    6. Add DC offset (sustained trend) — separate Conv2D broadcast across time.
 
-    Key changes vs previous version:
-    - CloudAwareGating removed: input is BAP-filled, gating was zeroing valid data.
-    - L2 regularisation removed from all heads: AdamW weight_decay handles it.
-    - DC offset added: model can represent sustained seasonal trends.
-    - Per-timestep weather residual: short-term anomalies modulate each forecast step.
-    - coeff_scale initialised at 0.1 instead of 1.0.
-    - All custom layer ops use keras.ops (not tf.*) for Keras 3 graph tracing.
+    Changes from previous architecture:
+    - Landcover moved from encoder to decoder (latent_fused concat) — avoids
+      wasting 16.4M redundant values per sample in the recurrent path.
+    - Per-frame DOY encoding added to encoder — gives ConvLSTM explicit
+      temporal positioning (season awareness per frame).
+    - Weather FiLM modulation applied to harmonics before DC offset — scale-only
+      ``harmonics * (1 + gamma)`` where gamma is zero-initialised.
     """
     n_bands = output_shape[-1]
     output_steps = output_shape[0]
@@ -253,36 +273,39 @@ def build_eo_convlstm_model(
     weather_input = Input(shape=weather_shape, name='weather_sequence')
     doy_input = Input(shape=target_start_doy_shape, name='target_start_doy')
 
-    # --- Tile landcover across time ---
-    landcover_reshaped = layers.Reshape(
-        (1,) + landcover_shape, name='lc_reshape')(landcover_input)
-    landcover_tiled = layers.UpSampling3D(
-        size=(time_steps, 1, 1), name='lc_tile')(landcover_reshaped)
+    # --- Per-frame DOY encoding: tile (B, 10, 3) spatially for encoder ---
+    # (B, 10, 3) -> (B, 10, 1, 1, 3) -> (B, 10, 128, 128, 3)
+    doy_reshaped = layers.Reshape(
+        (time_steps, 1, 1, temporal_shape[-1]), name='doy_reshape')(temporal_input)
+    doy_tiled = layers.UpSampling3D(
+        size=(1, img_h, img_w), name='doy_tile')(doy_reshaped)
 
-    # --- Encoder input: BAP-filled S2 + landcover (no cloud gating) ---
-    # The sentinel2_sequence is already BAP-filled in the data pipeline.
-    # Cloud gating was previously zeroing out those clean observations, depriving
-    # the encoder of temporal signal whenever cloud cover was high.
-    x = layers.Concatenate(axis=-1, name='input_concat')([img_input, landcover_tiled])
+    # --- Encoder input: BAP-filled S2 + per-frame DOY ---
+    # Landcover is no longer tiled here — it joins at the decoder stage.
+    x = layers.Concatenate(axis=-1, name='input_concat')([img_input, doy_tiled])
+    # Shape: (B, 10, 128, 128, 4 + 3 = 7)
 
     # --- ConvLSTM encoder ---
+    # recurrent_dropout removed: it disables cuDNN fusion, causing a ~3-5×
+    # slowdown (per-timestep Python loop instead of fused kernel).
+    # Regular dropout=0.3 between layers + GroupNorm is sufficient regularisation.
     enc1 = layers.ConvLSTM2D(
         filters=32, kernel_size=(3, 3), padding='same',
-        dropout=0.3, recurrent_dropout=0.2,
+        dropout=0.3,
         return_sequences=True, name='encoder_lstm1'
     )(x)
     enc1 = layers.GroupNormalization(groups=4, axis=-1, name='encoder_norm1')(enc1)
 
     enc2 = layers.ConvLSTM2D(
         filters=48, kernel_size=(3, 3), padding='same',
-        dropout=0.3, recurrent_dropout=0.2,
+        dropout=0.3,
         return_sequences=True, name='encoder_lstm2'
     )(enc1)
     enc2 = layers.GroupNormalization(groups=4, axis=-1, name='encoder_norm2')(enc2)
 
     latent = layers.ConvLSTM2D(
         filters=64, kernel_size=(3, 3), padding='same',
-        dropout=0.3, recurrent_dropout=0.2,
+        dropout=0.3,
         return_sequences=False, name='encoder_lstm3'
     )(enc2)
     latent = layers.GroupNormalization(groups=4, axis=-1, name='latent_norm')(latent)
@@ -294,8 +317,13 @@ def build_eo_convlstm_model(
     weather_flat = layers.Flatten(name='weather_flatten')(weather_input)
     weather_enc = layers.Dense(
         32, activation='relu', name='weather_enc')(weather_flat)
+
+    # Extract last timestep from per-frame temporal: (B, 10, 3) -> (B, 3)
+    temporal_last = layers.Cropping1D(
+        cropping=(time_steps - 1, 0), name='temporal_last')(temporal_input)
+    temporal_last = layers.Reshape((temporal_shape[-1],), name='temporal_last_reshape')(temporal_last)
     temporal_enc = layers.Dense(
-        16, activation='relu', name='temporal_enc')(temporal_input)
+        16, activation='relu', name='temporal_enc')(temporal_last)
     context = layers.Concatenate(name='context_concat')([weather_enc, temporal_enc])
 
     context_reshaped = layers.Reshape((1, 1, 48), name='context_reshape')(context)
@@ -303,10 +331,10 @@ def build_eo_convlstm_model(
         size=(img_h, img_w), name='context_tile')(context_reshaped)
     # Shape: (B, H, W, 48)
 
-    # --- Fuse latent, skip, and global context ---
+    # --- Fuse latent, skip, global context, and landcover ---
     latent_fused = layers.Concatenate(
-        axis=-1, name='latent_fused')([latent, skip, context_tiled])
-    # Shape: (B, H, W, 64 + 48 + 48 = 160)
+        axis=-1, name='latent_fused')([latent, skip, context_tiled, landcover_input])
+    # Shape: (B, H, W, 64 + 48 + 48 + 10 = 170)
 
     # --- Fourier coefficient head ---
     coefficients = FourierCoefficientHead(
@@ -318,13 +346,10 @@ def build_eo_convlstm_model(
     # Shape: (B, H, W, n_bands, 2K)
 
     # --- DC offset: separate Conv2D from latent_fused ---
-    # Predicts a per-pixel per-band constant added to every forecast step,
-    # enabling sustained trend predictions that pure harmonics cannot represent.
-    # Kept as a standalone layer (not inside FourierCoefficientHead) so that
-    # FourierCoefficientHead stays single-output — Keras 3 cannot trace
-    # multi-tensor returns from custom layers through the functional graph.
     dc_offset = layers.Conv2D(
-        n_bands, (1, 1), activation=None, name='dc_offset'
+        n_bands, (1, 1), activation=None,
+        kernel_initializer='zeros', bias_initializer='zeros',
+        name='dc_offset'
     )(latent_fused)
     # Shape: (B, H, W, n_bands)
 
@@ -338,27 +363,40 @@ def build_eo_convlstm_model(
     )([coefficients, doy_input])
     # Shape: (B, T, H, W, n_bands)
 
+    # --- Weather FiLM modulation ---
+    # Scale-only FiLM: harmonics * (1 + gamma) where gamma starts at zero.
+    # Zero-init ensures identity (no modulation) at start of training.
+    # Scale-only (no shift) means weather can't create signal from nothing.
+    # Applied before DC offset so weather modulates oscillatory harmonics,
+    # not the sustained trend.
+    weather_gamma = layers.TimeDistributed(
+        layers.Dense(
+            n_bands, activation=None,
+            kernel_initializer='zeros', bias_initializer='zeros',
+            name='film_dense'
+        ),
+        name='weather_film'
+    )(weather_input)
+    # Shape: (B, 20, n_bands)
+
+    # Broadcast gamma spatially: (B, 20, 4) -> (B, 20, 1, 1, 4) -> (B, 20, 128, 128, 4)
+    gamma_reshaped = layers.Reshape(
+        (output_steps, 1, 1, n_bands), name='film_reshape')(weather_gamma)
+    gamma_tiled = layers.UpSampling3D(
+        size=(1, img_h, img_w), name='film_tile')(gamma_reshaped)
+
+    # harmonics * (1 + gamma)
+    film_modulated = layers.Multiply(
+        name='film_multiply')([outputs_harmonics, gamma_tiled])
+    outputs_modulated = layers.Add(
+        name='film_add')([outputs_harmonics, film_modulated])
+    # Shape: (B, T, H, W, n_bands)
+
     # --- Broadcast DC offset across time ---
     # (B, H, W, n_bands) -> (B, 1, H, W, n_bands) -> (B, T, H, W, n_bands)
     dc_4d = layers.Reshape((1, img_h, img_w, n_bands), name='dc_reshape')(dc_offset)
     dc_5d = layers.UpSampling3D(size=(output_steps, 1, 1), name='dc_tile')(dc_4d)
-    outputs_fourier = layers.Add(name='dc_add')([outputs_harmonics, dc_5d])
-
-    # --- Per-timestep weather residual ---
-    # Allows short-term weather anomalies to modulate individual forecast steps,
-    # rather than being collapsed into a single global context vector.
-    weather_corr = layers.TimeDistributed(
-        layers.Dense(n_bands, activation=None),
-        name='weather_residual'
-    )(weather_input)  # (B, T, n_bands)
-
-    # (B, T, n_bands) -> (B, T, 1, 1, n_bands) -> (B, T, H, W, n_bands)
-    weather_corr_4d = layers.Reshape(
-        (output_steps, 1, 1, n_bands), name='weather_corr_reshape')(weather_corr)
-    weather_corr_5d = layers.UpSampling3D(
-        size=(1, img_h, img_w), name='weather_corr_tile')(weather_corr_4d)
-
-    outputs = layers.Add(name='output_add')([outputs_fourier, weather_corr_5d])
+    outputs = layers.Add(name='dc_add')([outputs_modulated, dc_5d])
 
     model = models.Model(
         inputs=[
@@ -387,6 +425,7 @@ def load_model(model_path: str, compile: bool = True) -> keras.Model:
 
     custom_objects = {
         'CloudAwareGatingLayer': CloudAwareGatingLayer,
+        'LearnableScale': LearnableScale,
         'LastTimestepLayer': LastTimestepLayer,
         'FourierCoefficientHead': FourierCoefficientHead,
         'FourierSynthesisLayer': FourierSynthesisLayer,

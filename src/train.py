@@ -10,6 +10,7 @@ from dataset import DatasetGenerator
 from build_model import build_eo_convlstm_model, load_model
 from losses import DeltaRegressionLoss
 from config import DATASET_PATH, VALIDATION_PATH
+from adapt_inputs import adapt_inputs
 
 
 class WarmupScheduler(keras.callbacks.Callback):
@@ -27,30 +28,18 @@ class WarmupScheduler(keras.callbacks.Callback):
             print(f'\nWarmup: Setting learning rate to {lr:.2e}')
 
 
-def adapt_inputs(x, y):
-    # Select the last time step for temporal metadata: (batch, input_frames, 3) -> (batch, 3)
-    t_meta = x['time'][:, -1, :]
-
-    x_new = {
-        'sentinel2_sequence': x['sentinel2'],
-        'landcover_map': x['landcover'],
-        'temporal_metadata': t_meta,
-        'weather_sequence': x['weather'],
-        'target_start_doy': x['target_start_doy']
-    }
-    return x_new, y
-
 
 def train_bspline_model(
     train_dir,
     val_dir=None,
     batch_size=1,
     epochs=2,
-    learning_rate=3e-4,
+    learning_rate=1e-4,
     checkpoint_dir='checkpoints',
     log_dir='logs/bspline',
     resume_from=None,
-    initial_epoch=0
+    initial_epoch=0,
+    strategy=None
 ):
     # Delete old logs/checkpoints only when starting fresh
     if resume_from is None:
@@ -82,28 +71,33 @@ def train_bspline_model(
         val_dataset = val_dataset.map(adapt_inputs, num_parallel_calls=tf.data.AUTOTUNE)
         val_dataset = val_dataset.prefetch(tf.data.AUTOTUNE)
 
-    if resume_from:
-        print(f"Resuming training from {resume_from}...")
-        model = load_model(resume_from, compile=True)
-    else:
-        print("Creating EO ConvLSTM model...")
-        model = build_eo_convlstm_model()
+    if strategy is None:
+        strategy = tf.distribute.get_strategy()
 
-        # clipnorm=5.0: previous value of 1.0 was too aggressive for a 3-layer
-        # ConvLSTM — gradients reaching the first encoder layer were cut before
-        # they could produce useful weight updates.
-        optimizer = keras.optimizers.AdamW(
-            learning_rate=learning_rate,
-            clipnorm=5.0
-        )
-        loss = DeltaRegressionLoss(
-            regression_weight=5.0,
-            edge_weight=0.1,
-            ndvi_weight=1.0,
-            diversity_weight=0.5,
-            temporal_weight=0.1,
-        )
-        model.compile(optimizer=optimizer, loss=loss)
+    with strategy.scope():
+        if resume_from:
+            print(f"Resuming training from {resume_from}...")
+            model = load_model(resume_from, compile=True)
+        else:
+            print("Creating EO ConvLSTM model...")
+            model = build_eo_convlstm_model()
+
+            # clipnorm=5.0: previous value of 1.0 was too aggressive for a 3-layer
+            # ConvLSTM — gradients reaching the first encoder layer were cut before
+            # they could produce useful weight updates.
+            optimizer = keras.optimizers.AdamW(
+                learning_rate=learning_rate,
+                clipnorm=5.0
+            )
+            loss = DeltaRegressionLoss(
+                regression_weight=5.0,
+                ndvi_weight=1.5,
+                temporal_weight=0.1,
+                band_weights=(0.75, 0.75, 1.25, 3.5),
+                horizon_w_min=0.5,
+                horizon_w_max=2.0,
+            )
+            model.compile(optimizer=optimizer, loss=loss)
 
     model.summary()
 
@@ -123,21 +117,21 @@ def train_bspline_model(
         keras.callbacks.ReduceLROnPlateau(
             monitor=monitor_metric,
             factor=0.5,
-            patience=15,
+            patience=8,
             min_lr=1e-9,
             verbose=1,
             mode='min'
         ),
         keras.callbacks.EarlyStopping(
             monitor=monitor_metric,
-            patience=35,
+            patience=15,
             restore_best_weights=True,
             verbose=1,
             mode='min'
         ),
         keras.callbacks.TensorBoard(
             log_dir=log_dir,
-            histogram_freq=1
+            histogram_freq=5
         )
     ]
 
@@ -174,24 +168,33 @@ def train_bspline_model(
 
 
 def configure_gpu():
-    """Configure GPU memory growth to prevent allocation failures."""
+    """Configure GPU memory growth and return a distribution strategy."""
     gpus = tf.config.list_physical_devices('GPU')
     if gpus:
         try:
             for gpu in gpus:
                 tf.config.experimental.set_memory_growth(gpu, True)
-                tf.config.set_logical_device_configuration(
-                    gpu,
-                    [tf.config.LogicalDeviceConfiguration(memory_limit=32 * 1024)]
-                )
             logical_gpus = tf.config.list_logical_devices('GPU')
             print(f"{len(gpus)} Physical GPUs, {len(logical_gpus)} Logical GPUs")
         except RuntimeError as e:
             print(e)
 
+    # NOTE: mixed_float16 is NOT used because cuDNN's RNN kernels (used by
+    # ConvLSTM2D) do not reliably support float16, causing
+    # CUDNN_STATUS_EXECUTION_FAILED. The model runs in float32.
+
+    if len(gpus) > 1:
+        strategy = tf.distribute.MirroredStrategy()
+        print(f"Using MirroredStrategy with {strategy.num_replicas_in_sync} replicas")
+    else:
+        strategy = tf.distribute.get_strategy()  # default single-device strategy
+        print("Using single-GPU strategy")
+
+    return strategy
+
 
 def main():
-    configure_gpu()
+    strategy = configure_gpu()
 
     parser = argparse.ArgumentParser(description="Train EO ConvLSTM + Fourier model")
 
@@ -201,9 +204,9 @@ def main():
     parser.add_argument('--log_dir', type=str, default='logs/bspline')
     parser.add_argument('--resume_from', type=str, default=None)
 
-    parser.add_argument('--batch_size', type=int, default=1)
+    parser.add_argument('--batch_size', type=int, default=4)
     parser.add_argument('--epochs', type=int, default=100)
-    parser.add_argument('--learning_rate', type=float, default=3e-4)
+    parser.add_argument('--learning_rate', type=float, default=1e-4)
     parser.add_argument('--initial_epoch', type=int, default=0)
 
     args = parser.parse_args()
@@ -217,7 +220,8 @@ def main():
         checkpoint_dir=args.checkpoint_dir,
         log_dir=args.log_dir,
         resume_from=args.resume_from,
-        initial_epoch=args.initial_epoch
+        initial_epoch=args.initial_epoch,
+        strategy=strategy
     )
 
 

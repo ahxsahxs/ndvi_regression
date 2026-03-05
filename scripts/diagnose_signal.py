@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 """
-Diagnostic script for weak delta signal strength.
+Diagnostic script for delta signal quality.
 
 Analyses how prediction error relates to delta magnitude, time step,
-land-cover class, spectral band, and architecture/loss design choices.
+land-cover class, and spectral band.
 
 Outputs:
   images/diagnostics/
-    01_error_vs_time.png          – MAE per timestep by land-cover class
-    02_amplitude_histogram.png    – |target| vs |predicted| delta distributions
-    03_coefficient_analysis.png   – Fourier coefficient & coeff_scale analysis
-    04_per_band_scatter.png       – True vs predicted deltas per band
-    05_loss_gradient_analysis.png – Huber vs Log-Cosh gradient comparison
-    06_summary.txt                – Quantitative summary
+    01_error_vs_time.png       – MAE per timestep by land-cover class
+    02_amplitude_histogram.png – |target| vs |predicted| delta distributions
+    03_coefficient_analysis.png – Fourier coefficient & coeff_scale analysis
+    04_per_band_scatter.png    – True vs predicted deltas per band
+    06_summary.txt             – Quantitative summary
 
 Usage:
     conda run -n tf-gpu python scripts/diagnose_signal.py --split val_chopped --max_samples 30
@@ -37,6 +36,7 @@ import matplotlib.pyplot as plt
 from build_model import load_model
 from dataset import DatasetGenerator
 from config import DATASET_PATH, VALIDATION_PATH
+from adapt_inputs import adapt_inputs
 
 # Output directory
 DIAG_DIR = os.path.join(PROJECT_ROOT, "images", "diagnostics")
@@ -69,18 +69,6 @@ BAND_NAMES = ["B02 (Blue)", "B03 (Green)", "B04 (Red)", "B8A (NIR)"]
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-def adapt_inputs(x, y):
-    """Match model input dict keys (same as train.py)."""
-    t_meta = x["time"][:, -1, :]
-    x_new = {
-        "sentinel2_sequence": x["sentinel2"],
-        "landcover_map": x["landcover"],
-        "temporal_metadata": t_meta,
-        "weather_sequence": x["weather"],
-        "target_start_doy": x["target_start_doy"],
-    }
-    return x_new, y
 
 
 def collect_predictions(model, dataset, max_samples):
@@ -243,7 +231,7 @@ def plot_amplitude_histogram(true_d, pred_d, masks, save_dir):
 # ---------------------------------------------------------------------------
 
 def plot_coefficient_analysis(model, save_dir):
-    """Analyse Fourier coefficient layer weights and coeff_scale."""
+    """Analyse Fourier coefficient conv kernel weights."""
     # Extract the FourierCoefficientHead layer
     head = None
     for layer in model.layers:
@@ -254,33 +242,18 @@ def plot_coefficient_analysis(model, save_dir):
         print("  ⚠ Could not find fourier_head layer — skipping coefficient analysis.")
         return {}
 
-    coeff_scale = head.coeff_scale.numpy().ravel()
-    
+    n_bands = head.n_bands
+    n_coeffs = head.n_coeffs
+
     # Get the final conv layer weights
     conv_weights = head.conv_coeffs.get_weights()
     kernel = conv_weights[0]  # (1, 1, hidden, n_bands*2K)
     bias = conv_weights[1] if len(conv_weights) > 1 else None
 
-    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 
-    # Panel 1: coeff_scale values
+    # Panel 1: Distribution of conv_coeffs kernel weights
     ax = axes[0]
-    # coeff_scale shape: (n_bands, n_coeffs) after squeezing leading dims
-    n_bands = head.n_bands
-    n_coeffs = head.n_coeffs
-    scale_2d = np.abs(coeff_scale.reshape(n_bands, n_coeffs))
-    for b in range(n_bands):
-        ax.bar(np.arange(n_coeffs) + b * (n_coeffs + 1), scale_2d[b],
-               label=BAND_NAMES[b], alpha=0.7)
-    ax.set_xlabel("Coefficient index (a_k, b_k pairs)")
-    ax.set_ylabel("|coeff_scale|")
-    ax.set_title("Learnable Amplitude Scale", fontsize=13, fontweight="bold")
-    ax.axhline(y=1.0, color="gray", linestyle="--", alpha=0.5, label="Init value (1.0)")
-    ax.legend(fontsize=9)
-    ax.grid(True, alpha=0.3, axis="y")
-
-    # Panel 2: Distribution of conv_coeffs kernel weights
-    ax = axes[1]
     ax.hist(kernel.ravel(), bins=60, color="tab:purple", alpha=0.7)
     ax.set_xlabel("Weight value")
     ax.set_ylabel("Count")
@@ -288,17 +261,17 @@ def plot_coefficient_analysis(model, save_dir):
     ax.axvline(x=0, color="gray", linestyle="--", alpha=0.5)
     ax.grid(True, alpha=0.3)
 
-    # Panel 3: Theoretical max delta from current coeff_scale
-    ax = axes[2]
-    # Max theoretical delta per band = sum of |coeff_scale| per band
-    # (since each basis function has max value 1)
-    max_delta_per_band = scale_2d.sum(axis=1)
-    ax.bar(range(n_bands), max_delta_per_band, color=[
+    # Panel 2: Per-band kernel weight std (proxy for amplitude capacity)
+    ax = axes[1]
+    # kernel shape: (1, 1, hidden, n_bands * n_coeffs) — reshape to per-band
+    kernel_flat = kernel.reshape(-1, n_bands, n_coeffs)
+    band_std = np.std(kernel_flat, axis=(0, 2))
+    ax.bar(range(n_bands), band_std, color=[
         "tab:blue", "tab:green", "tab:red", "tab:brown"], alpha=0.7)
     ax.set_xticks(range(n_bands))
     ax.set_xticklabels([b.split("(")[1].rstrip(")") for b in BAND_NAMES])
-    ax.set_ylabel("Max possible |delta|")
-    ax.set_title("Theoretical Max Delta per Band\n(Σ|coeff_scale| × 1.0)",
+    ax.set_ylabel("Kernel weight std")
+    ax.set_title("Per-Band Coefficient Kernel Spread",
                 fontsize=13, fontweight="bold")
     ax.grid(True, alpha=0.3, axis="y")
 
@@ -308,9 +281,6 @@ def plot_coefficient_analysis(model, save_dir):
     print("  ✓ 03_coefficient_analysis.png")
 
     return {
-        "coeff_scale_abs_mean": float(np.abs(coeff_scale).mean()),
-        "coeff_scale_abs_max": float(np.abs(coeff_scale).max()),
-        "theoretical_max_delta": float(max_delta_per_band.max()),
         "kernel_std": float(kernel.std()),
     }
 
@@ -368,72 +338,6 @@ def plot_per_band_scatter(true_d, pred_d, masks, save_dir, max_points=50000):
 
 
 # ---------------------------------------------------------------------------
-# Plot 5: Loss Gradient Analysis
-# ---------------------------------------------------------------------------
-
-def plot_loss_gradient_analysis(save_dir):
-    """Compare old Huber(δ=0.5) vs new Log-Cosh gradient shapes — analytical, no data needed."""
-    errors = np.linspace(-0.8, 0.8, 500)
-    delta = 0.5
-
-    # Huber loss & gradient (OLD)
-    huber_loss = np.where(np.abs(errors) <= delta,
-                          0.5 * errors**2,
-                          delta * np.abs(errors) - 0.5 * delta**2)
-    huber_grad = np.where(np.abs(errors) <= delta, errors, delta * np.sign(errors))
-
-    # Log-Cosh loss & gradient (NEW)
-    logcosh_loss = np.log(np.cosh(errors))
-    logcosh_grad = np.tanh(errors)
-
-    fig, axes = plt.subplots(1, 2, figsize=(16, 6))
-
-    # Loss curves
-    ax = axes[0]
-    ax.plot(errors, huber_loss, label=f"Huber δ={delta} (old)", linewidth=2.5, color="tab:orange")
-    ax.plot(errors, logcosh_loss, label="Log-Cosh (new)", linewidth=2.5, color="tab:green")
-    ax.axvline(x=delta, color="gray", linestyle=":", alpha=0.5)
-    ax.axvline(x=-delta, color="gray", linestyle=":", alpha=0.5)
-    ax.set_xlabel("Error (true - pred)", fontsize=12)
-    ax.set_ylabel("Loss value", fontsize=12)
-    ax.set_title("Loss Function Comparison", fontsize=13, fontweight="bold")
-    ax.legend(fontsize=12)
-    ax.grid(True, alpha=0.3)
-
-    # Gradient curves
-    ax = axes[1]
-    ax.plot(errors, np.abs(huber_grad), label=f"Huber δ={delta} (old)",
-            linewidth=2.5, color="tab:orange")
-    ax.plot(errors, np.abs(logcosh_grad), label="Log-Cosh (new)",
-            linewidth=2.5, color="tab:green")
-    ax.axvline(x=delta, color="gray", linestyle=":", alpha=0.5)
-    ax.axvline(x=-delta, color="gray", linestyle=":", alpha=0.5)
-
-    # Annotate Huber plateau
-    ax.axhspan(delta - 0.02, delta + 0.02, xmin=0.5, color="tab:orange",
-               alpha=0.1)
-    ax.annotate("Huber gradient caps\nat δ = 0.5",
-                xy=(0.6, delta), fontsize=10,
-                arrowprops=dict(arrowstyle="->"), xytext=(0.35, delta + 0.2))
-    ax.annotate("Log-Cosh gradient\ngrows smoothly via tanh",
-                xy=(0.7, np.tanh(0.7)), fontsize=10,
-                arrowprops=dict(arrowstyle="->"), xytext=(0.2, 0.85))
-
-    ax.set_xlabel("Error (true - pred)", fontsize=12)
-    ax.set_ylabel("|Gradient|", fontsize=12)
-    ax.set_title("Gradient Magnitude: Huber (old) vs Log-Cosh (new)\n"
-                 "(Log-Cosh gradient keeps growing past δ threshold)",
-                fontsize=13, fontweight="bold")
-    ax.legend(fontsize=12)
-    ax.grid(True, alpha=0.3)
-
-    fig.tight_layout()
-    fig.savefig(os.path.join(save_dir, "05_loss_gradient_analysis.png"), dpi=150)
-    plt.close(fig)
-    print("  ✓ 05_loss_gradient_analysis.png")
-
-
-# ---------------------------------------------------------------------------
 # Summary Report
 # ---------------------------------------------------------------------------
 
@@ -471,9 +375,6 @@ def write_summary(mae_per_step, amp_stats, coeff_stats, slope_info, save_dir):
     # 3. Coefficient analysis
     if coeff_stats:
         lines.append("3. FOURIER COEFFICIENT ANALYSIS")
-        lines.append(f"   Mean |coeff_scale|:       {coeff_stats['coeff_scale_abs_mean']:.4f}")
-        lines.append(f"   Max |coeff_scale|:        {coeff_stats['coeff_scale_abs_max']:.4f}")
-        lines.append(f"   Theoretical max |delta|:  {coeff_stats['theoretical_max_delta']:.4f}")
         lines.append(f"   Conv kernel weight std:   {coeff_stats['kernel_std']:.4f}")
         lines.append("")
 
@@ -535,7 +436,6 @@ def diagnose(model, generator, split="val_chopped", max_samples=30):
     amp_stats = plot_amplitude_histogram(true_d, pred_d, masks, DIAG_DIR)
     coeff_stats = plot_coefficient_analysis(model, DIAG_DIR)
     slope_info = plot_per_band_scatter(true_d, pred_d, masks, DIAG_DIR)
-    plot_loss_gradient_analysis(DIAG_DIR)
 
     print("\nWriting summary report ...")
     write_summary(mae_per_step, amp_stats, coeff_stats, slope_info, DIAG_DIR)

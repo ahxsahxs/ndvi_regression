@@ -26,6 +26,7 @@ from dataset import DatasetGenerator
 from build_model import load_model
 from config import DATASET_PATH, VALIDATION_PATH
 from gpu_config import configure_gpu
+from adapt_inputs import adapt_inputs
 
 CHECKPOINTS_DIR = os.path.join(os.path.dirname(__file__), '..', 'checkpoints')
 PRED_DIR = os.path.join(os.path.dirname(__file__), '..', 'preds')
@@ -90,16 +91,10 @@ def score_predictions(model_epoch=None, split='val_chopped', limit=None):
                 last_img = generator.compute_bap(x["sentinel2"], x["cloudmask"])
                 
                 x_batch = {k: np.expand_dims(v, axis=0) for k, v in x.items()}
-                
-                t_meta = x_batch['time'][:, -1, :]
-                x_new = {
-                    'sentinel2_sequence': x_batch['sentinel2'],
-                    'landcover_map': x_batch['landcover'],
-                    'weather_sequence': x_batch['weather'],
-                    'temporal_metadata': t_meta,
-                    'target_start_doy': x_batch['target_start_doy']
-                }
-                
+
+                # Use shared adapt_inputs with a dummy y to get model input dict
+                x_new, _ = adapt_inputs(x_batch, None)
+
                 y_pred = model.predict(x_new, verbose=0)
                 if isinstance(y_pred, list):
                     pred_deltas = y_pred[0]

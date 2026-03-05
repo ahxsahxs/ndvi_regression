@@ -46,7 +46,7 @@ def step_1_visualize(model, val_generator, split, **_):
         model=model,
         generator=val_generator,
     )
-    print("[1/4] Saved prediction visualizations.")
+    print("[1/5] Saved prediction visualizations.")
 
 
 def step_2_earthnet(model, val_generator, split, max_samples, **_):
@@ -55,7 +55,7 @@ def step_2_earthnet(model, val_generator, split, max_samples, **_):
     score_predictions(
         split=split
     )
-    print(f"[2/4] Generated comparison/")
+    print(f"[2/5] Generated comparison/")
 
 
 def step_3_diagnose(model, val_generator, split, max_samples, **_):
@@ -67,11 +67,11 @@ def step_3_diagnose(model, val_generator, split, max_samples, **_):
         split=split,
         max_samples=max_samples or 30,
     )
-    print("[3/4] Saved signal diagnostics.")
+    print("[3/5] Saved signal diagnostics.")
 
 
 def step_4_parameter_analysis(model, val_generator, split, max_samples, **_):
-    """[4/4] Parameter Analysis (gradient norms, harmonic coefficients, diversity)."""
+    """[4/5] Parameter Analysis (gradient norms, harmonic coefficients, diversity)."""
     from parameter_analysis import analyze_parameters
     analyze_parameters(
         model=model,
@@ -79,7 +79,19 @@ def step_4_parameter_analysis(model, val_generator, split, max_samples, **_):
         split=split,
         max_samples=max_samples or 20,
     )
-    print("[4/4] Saved parameter analysis.")
+    print("[4/5] Saved parameter analysis.")
+
+
+def step_5_tint(model, val_generator, split, max_samples, **_):
+    """[5/5] Tint Diagnostics (band trajectories, cross-band correlation, harmonic imbalance)."""
+    from diagnose_tint import diagnose_tint
+    diagnose_tint(
+        model=model,
+        generator=val_generator,
+        split=split,
+        max_samples=max_samples or 20,
+    )
+    print("[5/5] Saved tint diagnostics.")
 
 
 # Ordered step registry
@@ -88,6 +100,7 @@ ALL_STEPS = {
     2: ("EarthNet Comparison",      step_2_earthnet),
     3: ("Signal Diagnostics",       step_3_diagnose),
     4: ("Parameter Analysis",       step_4_parameter_analysis),
+    5: ("Tint Diagnostics",         step_5_tint),
 }
 
 

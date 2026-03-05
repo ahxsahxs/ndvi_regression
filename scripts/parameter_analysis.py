@@ -1,22 +1,19 @@
 #!/usr/bin/env python3
 """
-Parameter analysis script for diagnosing mode collapse.
+Parameter analysis script for model health diagnostics.
 
-Investigates the root causes of the model collapsing to near-zero predictions
-by examining gradient flow, Fourier coefficient distributions, loss component
-magnitudes, and prediction diversity.
+Examines gradient flow, Fourier coefficient distributions, prediction
+diversity, and target distributions by land cover class.
 
 Outputs:
   images/diagnostics/
-    10_gradient_norms.png         – Gradient norm per layer (identifies dead layers)
-    11_per_harmonic_coeffs.png    – Actual a_k/b_k coefficient distributions
-    12_prediction_diversity.png   – Prediction std across samples (mode collapse check)
-    13_l2_vs_regression_loss.png  – L2 penalty vs regression loss magnitudes
-    14_kndvi_dead_code.png        – What kNDVI loss WOULD be (demonstrating it's 0)
-    15_target_delta_by_lc.png     – Target delta distributions by land cover class
-    16_cloud_cover_analysis.png   – Cloud fraction in inputs and targets
-    17_fourier_basis.png          – Fourier basis functions for sample DOYs
-    18_collapse_summary.txt       – Quantitative summary of collapse indicators
+    10_gradient_norms.png       – Gradient norm per layer (identifies dead layers)
+    11_per_harmonic_coeffs.png  – Actual a_k/b_k coefficient distributions
+    12_prediction_diversity.png – Prediction std across samples (mode collapse check)
+    15_target_delta_by_lc.png   – Target delta distributions by land cover class
+    16_cloud_cover_analysis.png – Clear-sky fraction in target sequence
+    17_fourier_basis.png        – Fourier basis functions for sample DOYs
+    18_health_summary.txt       – Quantitative health summary
 
 Usage:
     conda run -n tf-gpu python scripts/parameter_analysis.py --split val_chopped --max_samples 20
@@ -41,6 +38,7 @@ import matplotlib.pyplot as plt
 from build_model import load_model
 from dataset import DatasetGenerator
 from config import DATASET_PATH, VALIDATION_PATH
+from adapt_inputs import adapt_inputs
 
 DIAG_DIR = os.path.join(PROJECT_ROOT, "images", "diagnostics")
 MODEL_PATH = os.path.join(PROJECT_ROOT, "checkpoints", "final_model.keras")
@@ -51,16 +49,6 @@ LC_NAMES = [
     "Built-up", "Bare/sparse", "Snow/Ice", "Water", "Wetland", "Mangrove",
 ]
 
-
-def adapt_inputs(x, y):
-    t_meta = x["time"][:, -1, :]
-    return {
-        "sentinel2_sequence": x["sentinel2"],
-        "landcover_map": x["landcover"],
-        "temporal_metadata": t_meta,
-        "weather_sequence": x["weather"],
-        "target_start_doy": x["target_start_doy"],
-    }, y
 
 
 # ---------------------------------------------------------------------------
@@ -95,7 +83,6 @@ def collect_data(model, dataset, max_samples):
             "true_deltas": y_batch[..., 1:5].numpy(),
             "bap": y_batch[..., 5:9].numpy(),
             "pred_deltas": pred.numpy(),
-            "cloudmask_in": x_batch["cloudmask_sequence"].numpy() if "cloudmask_sequence" in x_batch else None,
             "landcover": x_batch["landcover_map"].numpy(),
             "target_doy": x_batch["target_start_doy"].numpy(),
             "coeffs": coeffs,
@@ -365,209 +352,6 @@ def plot_prediction_diversity(records, save_dir):
 
 
 # ---------------------------------------------------------------------------
-# Plot 13: L2 Regularization vs Regression Loss Magnitude
-# ---------------------------------------------------------------------------
-
-def plot_l2_vs_regression_loss(model, dataset, save_dir):
-    """
-    Compare the magnitude of L2 regularization losses vs regression loss.
-
-    If L2 >> regression, the model is being pulled toward zero weights
-    faster than the data gradient can push them outward. This directly
-    causes mode collapse toward zero-amplitude predictions.
-    """
-    print("  Computing L2 vs regression loss (1 batch)...")
-    x_batch, y_batch = next(iter(dataset))
-
-    pred = model(x_batch, training=False)
-    true_deltas = y_batch[..., 1:5]
-    mask = 1.0 - y_batch[..., 0:1]
-
-    # Log-Cosh regression loss (same as ImprovedkNDVILoss)
-    error = pred - true_deltas
-    log_cosh_per_pixel = tf.math.log(tf.math.cosh(error))
-    masked_loss = log_cosh_per_pixel * mask
-    reg_loss = float(tf.reduce_mean(masked_loss).numpy())
-
-    # L2 regularization losses (Keras tracks these per-layer)
-    l2_losses = {}
-    total_l2 = 0.0
-    for layer in model.layers:
-        layer_l2 = 0.0
-        for weight in layer.weights:
-            if hasattr(layer, 'kernel_regularizer') and layer.kernel_regularizer is not None:
-                if 'fourier' in layer.name or 'encoder' in layer.name or 'weather' in layer.name or 'temporal' in layer.name:
-                    l2_val = float(tf.reduce_sum(weight ** 2).numpy()) * 1e-4
-                    layer_l2 += l2_val
-        if layer_l2 > 0:
-            l2_losses[layer.name] = layer_l2
-            total_l2 += layer_l2
-
-    # Also get Keras tracked losses
-    keras_reg_losses = model.losses
-    keras_total_l2 = sum(float(l.numpy()) for l in keras_reg_losses) if keras_reg_losses else 0.0
-
-    # Weighted losses as in training
-    weighted_reg = 5.0 * reg_loss
-    weighted_edge_estimate = 0.1 * reg_loss * 0.5  # edge is roughly similar scale
-
-    labels = ["Regression\n(×5.0 weight)", "Edge est.\n(×0.1)", "L2 Regularization\n(Keras tracked)"]
-    values = [weighted_reg, weighted_edge_estimate, keras_total_l2]
-    colors = ["tab:blue", "tab:orange", "tab:red"]
-
-    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
-
-    # Panel 1: Bar chart of loss components
-    ax = axes[0]
-    bars = ax.bar(labels, values, color=colors, alpha=0.7)
-    ax.set_ylabel("Loss magnitude", fontsize=12)
-    ax.set_title("Loss Component Magnitudes\n(if L2 >> Regression, collapse is expected)",
-                 fontsize=12, fontweight="bold")
-    ax.grid(True, alpha=0.3, axis="y")
-    for bar, val in zip(bars, values):
-        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + max(values) * 0.01,
-                f"{val:.5f}", ha="center", va="bottom", fontsize=10, fontweight="bold")
-
-    # Panel 2: Per-layer L2 breakdown
-    ax = axes[1]
-    if l2_losses:
-        layer_names = list(l2_losses.keys())
-        layer_vals = [l2_losses[n] for n in layer_names]
-        short_names = [n.replace("fourier_", "f_").replace("encoder_", "enc_") for n in layer_names]
-        ax.barh(range(len(short_names)), layer_vals, color="tab:red", alpha=0.7)
-        ax.set_yticks(range(len(short_names)))
-        ax.set_yticklabels(short_names, fontsize=9)
-        ax.set_xlabel("L2 penalty (estimated)", fontsize=12)
-        ax.set_title("Per-Layer L2 Regularization\n(drives weights toward zero)",
-                     fontsize=12, fontweight="bold")
-        ax.grid(True, alpha=0.3, axis="x")
-    else:
-        ax.text(0.5, 0.5, f"Keras tracked L2: {keras_total_l2:.6f}\n\nraw reg loss: {reg_loss:.6f}",
-                transform=ax.transAxes, ha="center", va="center", fontsize=12)
-        ax.set_title("L2 Regularization", fontsize=12, fontweight="bold")
-
-    fig.tight_layout()
-    fig.savefig(os.path.join(save_dir, "13_l2_vs_regression_loss.png"), dpi=150)
-    plt.close(fig)
-    print("  ✓ 13_l2_vs_regression_loss.png")
-
-    return {
-        "raw_reg_loss": reg_loss,
-        "weighted_reg_loss": weighted_reg,
-        "keras_total_l2": keras_total_l2,
-        "l2_to_regression_ratio": keras_total_l2 / (reg_loss + 1e-8),
-    }
-
-
-# ---------------------------------------------------------------------------
-# Plot 14: kNDVI Dead Code Verification
-# ---------------------------------------------------------------------------
-
-def plot_kndvi_dead_code(records, save_dir):
-    """
-    Compute what the kNDVI loss WOULD be if it were active.
-
-    The ImprovedkNDVILoss.call() never applies kndvi_weight — it's dead code.
-    This plot shows the magnitude of the kNDVI signal that is being ignored,
-    demonstrating that enabling it would provide meaningful gradient.
-    """
-    all_true_d = np.concatenate([r["true_deltas"] for r in records], axis=0)
-    all_pred_d = np.concatenate([r["pred_deltas"] for r in records], axis=0)
-    all_bap = np.concatenate([r["bap"] for r in records], axis=0)
-    all_mask = np.concatenate([r["mask"] for r in records], axis=0)
-
-    valid = (1.0 - all_mask[..., 0]).astype(bool)
-
-    # Reconstruct full reflectance
-    true_full = all_bap + all_true_d
-    pred_full = all_bap + all_pred_d
-
-    # kNDVI: (1 - k) / (1 + k), k = RBF kernel on (NIR, RED)
-    sigma = 1.0
-    for_each = {}
-    kndvi_diffs = []
-    kndvi_by_timestep = []
-    n_steps = all_true_d.shape[1]
-
-    for t in range(n_steps):
-        true_red = true_full[:, t, :, :, 2]  # Band index 2 = B04 (Red)
-        true_nir = true_full[:, t, :, :, 3]  # Band index 3 = B8A (NIR)
-        pred_red = pred_full[:, t, :, :, 2]
-        pred_nir = pred_full[:, t, :, :, 3]
-
-        def kndvi(nir, red):
-            k = np.exp(-(nir - red) ** 2 / (2 * sigma ** 2))
-            return (1 - k) / (1 + k + 1e-6)
-
-        true_k = kndvi(true_nir, true_red)
-        pred_k = kndvi(pred_nir, pred_red)
-        diff = np.abs(true_k - pred_k)
-        w = valid[:, t]
-        if w.sum() > 0:
-            kndvi_by_timestep.append(float((diff * w).sum() / w.sum()))
-        else:
-            kndvi_by_timestep.append(0.0)
-        kndvi_diffs.append(diff[valid[:, t]])
-
-    all_diffs = np.concatenate(kndvi_diffs) if kndvi_diffs else np.array([0.0])
-    mean_kndvi_loss = float(all_diffs.mean())
-
-    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
-
-    # Panel 1: kNDVI loss distribution
-    ax = axes[0]
-    bins = np.linspace(0, min(1.0, np.percentile(all_diffs, 99)), 60)
-    ax.hist(all_diffs, bins=bins, color="tab:purple", alpha=0.7, density=True)
-    ax.axvline(x=mean_kndvi_loss, color="red", linestyle="--",
-               label=f"Mean = {mean_kndvi_loss:.4f}")
-    ax.set_xlabel("|kNDVI_true - kNDVI_pred|", fontsize=12)
-    ax.set_ylabel("Density", fontsize=12)
-    ax.set_title("kNDVI Loss Distribution\n(this signal is IGNORED in training)",
-                 fontsize=12, fontweight="bold")
-    ax.legend(fontsize=11)
-    ax.grid(True, alpha=0.3)
-
-    # Panel 2: kNDVI loss vs timestep
-    ax = axes[1]
-    days = [(t + 1) * 5 + 50 for t in range(n_steps)]
-    ax.plot(days, kndvi_by_timestep, "o-", color="tab:purple", linewidth=2)
-    ax.set_xlabel("Forecast day", fontsize=12)
-    ax.set_ylabel("Mean |kNDVI loss|", fontsize=12)
-    ax.set_title("kNDVI Error vs Forecast Horizon\n(gradients that should be flowing back)",
-                 fontsize=12, fontweight="bold")
-    ax.grid(True, alpha=0.3)
-
-    # Panel 3: Regression loss vs kNDVI loss comparison
-    ax = axes[2]
-    # Regression loss using log-cosh
-    reg_errors = np.abs(all_true_d[valid[:, np.newaxis, np.newaxis, np.newaxis].repeat(all_true_d.shape[1], axis=1)
-                                    if False else ...].ravel()[:len(all_diffs)])
-    log_cosh_vals = np.log(np.cosh(np.concatenate([r["true_deltas"] for r in records])[
-        np.concatenate([r["mask"] for r in records])[..., 0] < 0.5] -
-        np.concatenate([r["pred_deltas"] for r in records])[
-        np.concatenate([r["mask"] for r in records])[..., 0] < 0.5]).ravel()
-    )
-
-    labels = [
-        f"Regression\n(log-cosh)\nmean={np.abs(log_cosh_vals).mean():.4f}",
-        f"kNDVI loss\n(IGNORED)\nmean={mean_kndvi_loss:.4f}",
-    ]
-    vals = [np.abs(log_cosh_vals).mean(), mean_kndvi_loss]
-    ax.bar(labels, vals, color=["tab:blue", "tab:purple"], alpha=0.7)
-    ax.set_ylabel("Mean loss magnitude", fontsize=12)
-    ax.set_title("Regression vs kNDVI Loss Magnitudes\n(kNDVI is non-trivial but disabled)",
-                 fontsize=12, fontweight="bold")
-    ax.grid(True, alpha=0.3, axis="y")
-
-    fig.tight_layout()
-    fig.savefig(os.path.join(save_dir, "14_kndvi_dead_code.png"), dpi=150)
-    plt.close(fig)
-    print("  ✓ 14_kndvi_dead_code.png")
-
-    return {"mean_kndvi_loss_if_active": mean_kndvi_loss}
-
-
-# ---------------------------------------------------------------------------
 # Plot 15: Target Delta Distribution by Land Cover
 # ---------------------------------------------------------------------------
 
@@ -647,92 +431,51 @@ def plot_target_deltas_by_landcover(records, save_dir):
 
 def plot_cloud_cover_analysis(records, save_dir):
     """
-    Analyse cloud fraction in the target sequence.
+    Analyse clear-sky fraction in the target sequence.
 
-    Input cloudmask is no longer available since the encoder uses BAP-filled
-    sequences without CloudAwareGating. Only the target clear-sky mask (used
-    to gate the regression loss) is analysed here.
+    The encoder receives BAP-filled sequences — no input cloud mask exists.
+    Only the target clear-sky mask (which gates the regression loss) is shown.
     """
     all_mask_out = np.concatenate([r["mask"] for r in records], axis=0)
     # shape: (N, T_out, H, W, 1)
 
     target_cloud_per_step = all_mask_out[..., 0].mean(axis=(0, 2, 3))  # (T_out,)
-    target_cloud_per_sample = all_mask_out[..., 0].mean(axis=(1, 2, 3))  # (N,)
 
-    # Check whether input cloudmask records exist (legacy support)
-    has_cloud_in = records[0].get("cloudmask_in") is not None
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 
-    if has_cloud_in:
-        all_cloud_in = np.concatenate([r["cloudmask_in"] for r in records], axis=0)
-        cloud_frac_per_step = all_cloud_in[..., 0].mean(axis=(0, 2, 3))
-        cloud_frac_per_sample = all_cloud_in[..., 0].mean(axis=(1, 2, 3))
-        n_cols = 3
-    else:
-        n_cols = 2
-
-    fig, axes = plt.subplots(1, n_cols, figsize=(6 * n_cols, 5))
-
-    col = 0
-
-    if has_cloud_in:
-        # Panel: Cloud fraction per input timestep
-        ax = axes[col]; col += 1
-        t_in = [(t + 1) * 5 + 4 for t in range(all_cloud_in.shape[1])]
-        ax.bar(t_in, cloud_frac_per_step, color="tab:gray", alpha=0.7)
-        ax.axhline(y=0.5, color="red", linestyle="--", label="50% cloud cover")
-        ax.set_xlabel("Day of input sequence", fontsize=12)
-        ax.set_ylabel("Mean cloud fraction", fontsize=12)
-        ax.set_title("Cloud Cover in Input Sequence", fontsize=12, fontweight="bold")
-        ax.legend(fontsize=10)
-        ax.set_ylim(0, 1)
-        ax.grid(True, alpha=0.3, axis="y")
-
-        # Panel: Cloud fraction distribution per sample
-        ax = axes[col]; col += 1
-        ax.hist(cloud_frac_per_sample, bins=30, color="tab:blue", alpha=0.7)
-        ax.axvline(x=cloud_frac_per_sample.mean(), color="red", linestyle="--",
-                   label=f"Mean = {cloud_frac_per_sample.mean():.2f}")
-        ax.set_xlabel("Mean cloud fraction per sample", fontsize=12)
-        ax.set_ylabel("Count", fontsize=12)
-        ax.set_title("Distribution of Input Cloud Cover\nAcross Samples", fontsize=12, fontweight="bold")
-        ax.legend(fontsize=10)
-        ax.grid(True, alpha=0.3)
-    else:
-        # Panel: N/A note for input cloudmask
-        ax = axes[col]; col += 1
-        ax.text(0.5, 0.5,
-                "Input cloudmask not available.\nEncoder uses BAP-filled sequences\n(CloudAwareGating removed).",
-                ha="center", va="center", fontsize=13, transform=ax.transAxes,
-                bbox=dict(boxstyle="round", facecolor="lightyellow", edgecolor="gray"))
-        ax.set_title("Cloud Cover in Input Sequence", fontsize=12, fontweight="bold")
-        ax.axis("off")
-
-    # Panel: Target cloud fraction per output step
-    ax = axes[col]
+    # Panel 1: Clear-sky fraction per forecast timestep
+    ax = axes[0]
     t_out = [(t + 1) * 5 + 54 for t in range(all_mask_out.shape[1])]
-    ax.bar(t_out, target_cloud_per_step, color="tab:orange", alpha=0.7)
-    ax.axhline(y=0.5, color="red", linestyle="--", label="50% cloud cover")
+    clear_per_step = 1.0 - target_cloud_per_step
+    ax.bar(t_out, clear_per_step, color="tab:orange", alpha=0.7)
+    ax.axhline(y=0.5, color="red", linestyle="--", label="50% clear-sky")
     ax.set_xlabel("Forecast day", fontsize=12)
     ax.set_ylabel("Mean clear-sky fraction", fontsize=12)
-    ax.set_title("Clear-sky Fraction in Target Sequence\n"
-                 "(regression loss computed on clear pixels only)",
+    ax.set_title("Clear-sky Fraction per Forecast Step\n(regression loss computed on clear pixels only)",
                  fontsize=12, fontweight="bold")
     ax.legend(fontsize=10)
     ax.set_ylim(0, 1)
     ax.grid(True, alpha=0.3, axis="y")
+
+    # Panel 2: Distribution of per-sample mean clear-sky fraction
+    ax = axes[1]
+    clear_per_sample = 1.0 - all_mask_out[..., 0].mean(axis=(1, 2, 3))
+    ax.hist(clear_per_sample, bins=30, color="tab:blue", alpha=0.7)
+    ax.axvline(x=float(clear_per_sample.mean()), color="red", linestyle="--",
+               label=f"Mean = {clear_per_sample.mean():.2f}")
+    ax.set_xlabel("Mean clear-sky fraction per sample", fontsize=12)
+    ax.set_ylabel("Count", fontsize=12)
+    ax.set_title("Distribution of Target Clear-sky Cover\nAcross Samples",
+                 fontsize=12, fontweight="bold")
+    ax.legend(fontsize=10)
+    ax.grid(True, alpha=0.3)
 
     fig.tight_layout()
     fig.savefig(os.path.join(save_dir, "16_cloud_cover_analysis.png"), dpi=150)
     plt.close(fig)
     print("  ✓ 16_cloud_cover_analysis.png")
 
-    result = {
-        "mean_target_clear_frac": float(target_cloud_per_step.mean()),
-    }
-    if has_cloud_in:
-        result["mean_input_cloud_frac"] = float(cloud_frac_per_sample.mean())
-        result["max_input_cloud_frac"] = float(cloud_frac_per_sample.max())
-    return result
+    return {"mean_target_clear_frac": float(clear_per_step.mean())}
 
 
 # ---------------------------------------------------------------------------
@@ -788,16 +531,16 @@ def plot_fourier_basis(records, save_dir, n_harmonics=6):
         basis_sum = phi.sum(axis=1)  # Sum of all K cosines + K sines
         ax.plot(days, basis_sum, "k-", linewidth=2, label="Sum of all basis")
         ax.fill_between(days, 0, basis_sum, alpha=0.2)
-        ax.axhline(y=0, color="red", linestyle="--", label="Zero line (DC offset)")
+        ax.axhline(y=0, color="red", linestyle="--", label="Zero line")
         ax.set_xlabel("Forecast offset (days)")
         ax.set_ylabel("Summed basis value")
-        ax.set_title(f"Basis Sum (start DOY≈{int(doy_norm*365)})\nA constant offset would allow non-zero mean predictions",
+        ax.set_title(f"Basis Sum (start DOY≈{int(doy_norm*365)})\n(DC offset added separately in dc_offset Conv2D)",
                      fontsize=11, fontweight="bold")
         ax.legend(fontsize=9)
         ax.grid(True, alpha=0.3)
 
     fig.suptitle("Fourier Basis Functions for Sample DOYs\n"
-                 "(Note: no DC term means basis cannot represent sustained trends)",
+                 "(DC offset is a separate Conv2D layer added before the output)",
                  fontsize=13, fontweight="bold")
     fig.tight_layout()
     fig.savefig(os.path.join(save_dir, "17_fourier_basis.png"), dpi=150)
@@ -809,11 +552,11 @@ def plot_fourier_basis(records, save_dir, n_harmonics=6):
 # Summary Report
 # ---------------------------------------------------------------------------
 
-def write_collapse_summary(grad_stats, harmonic_stats, diversity_stats, l2_stats,
-                            kndvi_stats, cloud_stats, save_dir):
+def write_health_summary(grad_stats, harmonic_stats, diversity_stats, cloud_stats, save_dir):
+    """Write a quantitative model health summary derived from runtime data."""
     lines = []
     lines.append("=" * 70)
-    lines.append("  MODE COLLAPSE PARAMETER ANALYSIS REPORT")
+    lines.append("  MODEL HEALTH PARAMETER ANALYSIS REPORT")
     lines.append("=" * 70)
     lines.append("")
 
@@ -822,94 +565,59 @@ def write_collapse_summary(grad_stats, harmonic_stats, diversity_stats, l2_stats
     dead = grad_stats.get("dead_layers", [])
     weak = grad_stats.get("weak_layers", [])
     lines.append(f"   Dead layers (grad norm < 1e-5): {len(dead)}")
-    for l in dead:
-        lines.append(f"     - {l}")
+    for la in dead:
+        lines.append(f"     - {la}")
     lines.append(f"   Weak layers (grad norm < 1e-3): {len(weak)}")
-    for l in weak[:5]:
-        lines.append(f"     - {l}")
+    for la in weak[:5]:
+        lines.append(f"     - {la}")
+    grad_ok = len(dead) == 0 and len(weak) == 0
+    lines.append(f"   Status: {'OK' if grad_ok else 'WARNING — check dead/weak layers above'}")
     lines.append("")
 
     lines.append("2. FOURIER COEFFICIENT HEALTH")
     if harmonic_stats:
-        for k in range(1, 7):
-            a_std = harmonic_stats.get(f"k{k}_a_std", 0)
+        n_near_zero = 0
+        for k in range(1, 10):
+            a_std = harmonic_stats.get(f"k{k}_a_std")
+            if a_std is None:
+                break
             b_std = harmonic_stats.get(f"k{k}_b_std", 0)
             amp = harmonic_stats.get(f"k{k}_amplitude", 0)
             status = "OK" if amp > 0.01 else "NEAR-ZERO"
+            if status == "NEAR-ZERO":
+                n_near_zero += 1
             lines.append(f"   Harmonic k={k}: a_std={a_std:.4f}, b_std={b_std:.4f}, "
                          f"mean_amplitude={amp:.4f}  [{status}]")
+        lines.append(f"   Near-zero harmonics: {n_near_zero} "
+                     f"({'OK' if n_near_zero <= 2 else 'WARNING — coefficients collapsing'})")
+    else:
+        lines.append("   No coefficient data available.")
     lines.append("")
 
-    lines.append("3. MODE COLLAPSE INDICATORS")
+    lines.append("3. PREDICTION DIVERSITY")
     dr = diversity_stats.get("diversity_ratio", 0)
     lines.append(f"   Prediction std / Target std: {dr:.4f}  (1.0 = good, << 1.0 = collapsed)")
     lines.append(f"   Mean prediction std: {diversity_stats.get('mean_pred_std', 0):.5f}")
     lines.append(f"   Mean target std:     {diversity_stats.get('mean_true_std', 0):.5f}")
     ratios = diversity_stats.get("per_band_ratios", [])
+    band_names = ["B02 (Blue)", "B03 (Green)", "B04 (Red)", "B8A (NIR)"]
     for b, r in enumerate(ratios):
-        lines.append(f"   Band {b} diversity ratio: {r:.4f}")
+        status = "OK" if r > 0.5 else ("LOW" if r > 0.25 else "COLLAPSED")
+        bname = band_names[b] if b < len(band_names) else f"Band {b}"
+        lines.append(f"   {bname} diversity ratio: {r:.4f}  [{status}]")
     lines.append("")
 
-    lines.append("4. L2 REGULARIZATION vs REGRESSION LOSS")
-    lines.append(f"   Raw regression loss (log-cosh): {l2_stats.get('raw_reg_loss', 0):.6f}")
-    lines.append(f"   Weighted regression (×5.0):     {l2_stats.get('weighted_reg_loss', 0):.6f}")
-    lines.append(f"   Total L2 regularization:        {l2_stats.get('keras_total_l2', 0):.6f}")
-    ratio = l2_stats.get("l2_to_regression_ratio", 0)
-    lines.append(f"   L2/Regression ratio:            {ratio:.4f}  "
-                 f"({'L2 DOMINATES' if ratio > 0.1 else 'OK'})")
-    lines.append("")
-
-    lines.append("5. kNDVI AUXILIARY LOSS (DEAD CODE)")
-    lines.append(f"   Mean kNDVI loss if active: {kndvi_stats.get('mean_kndvi_loss_if_active', 0):.5f}")
-    lines.append("   Status: kNDVI computation is MISSING from ImprovedkNDVILoss.call()")
-    lines.append("   The kndvi_weight tf.Variable is never referenced in call().")
-    lines.append("")
-
-    lines.append("6. CLOUD COVER")
-    if "mean_input_cloud_frac" in cloud_stats:
-        lines.append(f"   Mean input cloud fraction:  {cloud_stats['mean_input_cloud_frac']:.3f}")
-        lines.append(f"   Max input cloud fraction:   {cloud_stats['max_input_cloud_frac']:.3f}")
-    else:
-        lines.append("   Input cloud fraction: N/A (encoder uses BAP-filled sequences, no cloudmask input)")
-    target_clear = cloud_stats.get("mean_target_clear_frac", cloud_stats.get("mean_target_cloud_frac", 0))
-    lines.append(f"   Mean target clear-sky fraction: {target_clear:.3f}")
-    lines.append("")
-
-    lines.append("=" * 70)
-    lines.append("  ROOT CAUSES (in priority order)")
-    lines.append("=" * 70)
-    lines.append("")
-    lines.append("  [BUG-1] kNDVI auxiliary loss is dead code in ImprovedkNDVILoss.call().")
-    lines.append("          The kNDVI computation block is missing from the call() method.")
-    lines.append("          FIX: Add kNDVI loss computation and apply kndvi_weight in call().")
-    lines.append("")
-    lines.append("  [BUG-2] L2 regularization on all FourierCoefficientHead conv layers")
-    lines.append("          drives Fourier coefficients toward zero (mode collapse).")
-    lines.append("          FIX: Remove L2 from FourierCoefficientHead or reduce lambda to 1e-6.")
-    lines.append("")
-    lines.append("  [ARCH-1] No DC offset in Fourier representation.")
-    lines.append("           Cannot represent sustained trends (monotonic increase/decrease).")
-    lines.append("           FIX: Add a learnable bias per pixel per band as a DC term.")
-    lines.append("")
-    lines.append("  [ARCH-2] CloudAwareGating zeros BAP-filled values for cloudy timesteps,")
-    lines.append("           making the encoder input very sparse when cloud cover is high.")
-    lines.append("           FIX: Apply gating only to S2 channels, not to landcover.")
-    lines.append("           Or use the BAP-filled inputs without gating (BAP is already clean).")
-    lines.append("")
-    lines.append("  [ARCH-3] Weather features collapsed to a single global context vector.")
-    lines.append("           Per-timestep weather anomalies cannot modulate per-step predictions.")
-    lines.append("           FIX: Use weather as per-timestep additive correction on output.")
-    lines.append("")
-    lines.append("  [TRAIN-1] gradient clipnorm=1.0 may be too aggressive for a 3-layer")
-    lines.append("            ConvLSTM. Signals may not reach the first encoder layer.")
-    lines.append("            FIX: Increase clipnorm to 5.0 or use clipvalue instead.")
+    lines.append("4. CLEAR-SKY COVERAGE (TARGET SEQUENCE)")
+    target_clear = cloud_stats.get("mean_target_clear_frac", 0)
+    lines.append(f"   Mean clear-sky fraction: {target_clear:.3f}")
+    lines.append(f"   Status: {'OK' if target_clear > 0.4 else 'LOW — many timesteps cloud-masked'}")
     lines.append("")
 
     report = "\n".join(lines)
-    path = os.path.join(save_dir, "18_collapse_summary.txt")
+    path = os.path.join(save_dir, "18_health_summary.txt")
     with open(path, "w") as f:
         f.write(report)
-    print("  ✓ 18_collapse_summary.txt")
+    print("  ✓ 18_health_summary.txt")
     print()
     print(report)
     return report
@@ -935,15 +643,12 @@ def analyze_parameters(model, generator, split="val_chopped", max_samples=20):
     grad_stats = plot_gradient_norms(model, dataset, DIAG_DIR)
     harmonic_stats = plot_per_harmonic_coefficients(records, model, DIAG_DIR)
     diversity_stats = plot_prediction_diversity(records, DIAG_DIR)
-    l2_stats = plot_l2_vs_regression_loss(model, dataset, DIAG_DIR)
-    kndvi_stats = plot_kndvi_dead_code(records, DIAG_DIR)
     lc_stats = plot_target_deltas_by_landcover(records, DIAG_DIR)
     cloud_stats = plot_cloud_cover_analysis(records, DIAG_DIR)
     plot_fourier_basis(records, DIAG_DIR)
 
     print("\nWriting summary ...")
-    write_collapse_summary(grad_stats, harmonic_stats, diversity_stats, l2_stats,
-                           kndvi_stats, cloud_stats, DIAG_DIR)
+    write_health_summary(grad_stats, harmonic_stats, diversity_stats, cloud_stats, DIAG_DIR)
 
     print(f"\nAll diagnostics saved to: {DIAG_DIR}")
 
